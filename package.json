@@ -1,0 +1,27 @@
+{
+  "name": "binance-square-reposter",
+  "version": "1.0.0",
+  "description": "Tracks a Binance Square creator, rewrites posts via Gemini API, and republishes them.",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "standalone": "node src/standalone.js",
+    "gainers": "node src/standaloneGainers.js",
+    "start": "node src/standaloneGainers.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "node-cron": "^3.0.3",
+    "better-sqlite3": "^11.3.0"
+  },
+  "devDependencies": {
+    "wrangler": "^3.78.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

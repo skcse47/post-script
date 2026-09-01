@@ -1,0 +1,23 @@
+name = "binance-square-movers-bot"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+
+# ── Cron Trigger: fires every 10 minutes ──
+[triggers]
+crons = ["*/10 * * * *"]
+
+# ── KV Namespace for round-robin state ──
+[[kv_namespaces]]
+binding = "POST_CACHE"
+id = "eece06a6ca6d47318ebfda65cb692fd8"
+preview_id = "<YOUR_PREVIEW_KV_ID>"
+
+# ── Variables & Secrets ──
+[vars]
+LLM_PROVIDER = "openrouter"
+LLM_MODEL = "qwen/qwen-2.5-7b-instruct"
+
+# Secrets to set via `wrangler secret put <NAME>`:
+# - BINANCE_SQUARE_API_KEY
+# - OPENROUTER_API_KEY
+# - GEMINI_API_KEY
