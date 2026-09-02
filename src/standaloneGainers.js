@@ -218,26 +218,26 @@ export async function executeRoundRobinCycle() {
 
 console.log("=========================================================");
 console.log("⚡ Binance Square Top Gainers & Losers Round-Robin Bot");
-console.log("⏱️  Cron Schedule: Every 10 minutes (*/10 * * * *)");
+console.log("⏱️  Cron Schedule: Every 30 minutes (*/30 * * * *)");
 console.log("🔄 Queue Cycle: 5 Gainers -> 5 Losers -> Refresh & Repeat");
 console.log("📁 SQLite DB: " + DB_PATH);
 console.log("=========================================================\n");
 
-// Check if a post was published very recently (< 8 minutes ago)
+// Check if a post was published very recently (< 25 minutes ago)
 const lastPostTime = getLastPostTime();
 const elapsedMinutes = (Date.now() - lastPostTime) / (60 * 1000);
 
-if (lastPostTime > 0 && elapsedMinutes < 8) {
-  const waitMins = Math.ceil(10 - elapsedMinutes);
+if (lastPostTime > 0 && elapsedMinutes < 25) {
+  const waitMins = Math.ceil(30 - elapsedMinutes);
   console.log(`[startup] ⏳ Last post was published ${elapsedMinutes.toFixed(1)} mins ago.`);
-  console.log(`[startup] Waiting for next scheduled 10-minute cron interval (~${waitMins} min) to prevent duplicate rapid posting.\n`);
+  console.log(`[startup] Waiting for next scheduled 30-minute cron interval (~${waitMins} min) to prevent duplicate rapid posting.\n`);
 } else {
   // Otherwise run initial cycle on launch
   executeRoundRobinCycle();
 }
 
-// Schedule to run exactly every 10 minutes (:00, :10, :20, :30, :40, :50)
-cron.schedule("*/10 * * * *", () => {
+// Schedule to run exactly every 30 minutes (:00, :30)
+cron.schedule("*/30 * * * *", () => {
   executeRoundRobinCycle();
 });
 

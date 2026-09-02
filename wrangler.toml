@@ -2,9 +2,9 @@ name = "binance-square-movers-bot"
 main = "src/index.js"
 compatibility_date = "2024-09-01"
 
-# ── Cron Trigger: fires every 10 minutes ──
+# ── Cron Trigger: fires every 30 minutes ──
 [triggers]
-crons = ["*/10 * * * *"]
+crons = ["*/30 * * * *"]
 
 # ── KV Namespace for round-robin state ──
 [[kv_namespaces]]

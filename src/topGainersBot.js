@@ -51,8 +51,12 @@ export function formatPrice(num) {
  * @returns {Promise<{gainers: Array<object>, losers: Array<object>, queue: Array<object>}>}
  */
 export async function getMarketMovers(countPerCategory = 5, minVolumeUSDT = 500000) {
-  console.log("[market] Fetching 24h ticker statistics from Binance API...");
-  const res = await fetch(BINANCE_TICKER_24HR_URL);
+  const res = await fetch(BINANCE_TICKER_24HR_URL, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept": "application/json",
+    },
+  });
   
   if (!res.ok) {
     throw new Error(`Failed to fetch 24h tickers: ${res.status} ${res.statusText}`);
