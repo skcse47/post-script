@@ -7,7 +7,12 @@
  * with dynamic catchy opening hooks, explicit dollar price levels, and clickable coin cashtags ($BTC, $SOL, etc.).
  */
 
-const BINANCE_TICKER_24HR_URL = "https://api.binance.com/api/v3/ticker/24hr";
+const BINANCE_TICKER_URLS = [
+  "https://data-api.binance.vision/api/v3/ticker/24hr",
+  "https://api.binance.com/api/v3/ticker/24hr",
+  "https://fapi.binance.com/fapi/v1/ticker/24hr",
+  "https://api.mexc.com/api/v3/ticker/24hr",
+];
 const BINANCE_SQUARE_PUBLISH_URL =
   "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add";
 
@@ -22,6 +27,14 @@ const GEMINI_CANDIDATE_MODELS = [
   "gemini-1.5-flash",
   "gemini-1.5-pro",
   "gemini-pro"
+];
+
+// High-liquidity & most searched coins on Binance Square
+const POPULAR_WATCHLIST = [
+  "BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "PEPE", "SUI",
+  "NEAR", "AVAX", "LINK", "SHIB", "FET", "APT", "RENDER",
+  "INJ", "WIF", "ADA", "TIA", "ARB", "OP", "DOT", "LTC",
+  "GALA", "SEI", "FLOKI", "BONK", "TON", "FTM", "JASMY", "ENA", "PENDLE"
 ];
 
 // Blacklist stablecoin pairs & leveraged tokens
@@ -45,24 +58,47 @@ export function formatPrice(num) {
 }
 
 /**
- * Fetch 24h tickers from Binance and return structured Top Gainers and Top Losers.
- * @param {number} countPerCategory Number of gainers and losers (default: 5 each)
- * @param {number} minVolumeUSDT Minimum 24h volume in USDT to filter illiquid pairs
+ * Fetch top technical setups from popular liquid coins + trending market movers.
+ * @param {number} count Number of coins to return in the queue
+ * @param {number} minVolumeUSDT Minimum 24h volume
  * @returns {Promise<{gainers: Array<object>, losers: Array<object>, queue: Array<object>}>}
  */
-export async function getMarketMovers(countPerCategory = 5, minVolumeUSDT = 500000) {
-  const res = await fetch(BINANCE_TICKER_24HR_URL, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept": "application/json",
-    },
-  });
+export async function getMarketMovers(count = 10, minVolumeUSDT = 1_000_000) {
+  console.log("[market] Scanning top liquid coins & technical setups...");
   
-  if (!res.ok) {
-    throw new Error(`Failed to fetch 24h tickers: ${res.status} ${res.statusText}`);
+  let tickers = null;
+  const errors = [];
+
+  for (const url of BINANCE_TICKER_URLS) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "application/json",
+        },
+      });
+
+      if (res.ok) {
+        tickers = await res.json();
+        break;
+      } else {
+        errors.push(`${url} => HTTP ${res.status}: ${res.statusText}`);
+      }
+    } catch (err) {
+      errors.push(`${url} => ${err.message}`);
+    }
   }
 
-  const tickers = await res.json();
+  if (!tickers || !Array.isArray(tickers)) {
+    throw new Error(`Failed to fetch tickers: ${errors.join(" | ")}`);
+  }
+
+  const tickerMap = new Map();
+  for (const t of tickers) {
+    if (t.symbol && t.symbol.endsWith("USDT")) {
+      tickerMap.set(t.symbol, t);
+    }
+  }
 
   const validPairs = tickers
     .filter((t) => {
@@ -77,11 +113,41 @@ export async function getMarketMovers(countPerCategory = 5, minVolumeUSDT = 5000
     })
     .map((t) => {
       const lastPrice = parseFloat(t.lastPrice);
-      const priceChangePercent = parseFloat(t.priceChangePercent);
+      let priceChangePercent = parseFloat(t.priceChangePercent);
+      if (Math.abs(priceChangePercent) > 0 && Math.abs(priceChangePercent) <= 1.5) {
+        priceChangePercent = priceChangePercent * 100;
+      }
       const highPrice = parseFloat(t.highPrice);
       const lowPrice = parseFloat(t.lowPrice);
       const quoteVolume = parseFloat(t.quoteVolume);
       const baseAsset = t.symbol.replace("USDT", "");
+      
+      // Calculate technical range position (0% = at 24h low, 100% = at 24h high)
+      const range = highPrice - lowPrice;
+      const rangePosition = range > 0 ? ((lastPrice - lowPrice) / range) * 100 : 50;
+
+      // Classify technical trade archetype
+      let setupType = "TREND_PULLBACK_LONG";
+      let direction = "LONG";
+      if (rangePosition >= 80 && priceChangePercent > 3) {
+        setupType = "24H_BREAKOUT_MOMENTUM";
+        direction = "LONG";
+      } else if (rangePosition <= 25 && priceChangePercent < -3) {
+        setupType = "OVERSOLD_SUPPORT_BOUNCE";
+        direction = "DIP_BUY";
+      } else if (priceChangePercent < -10) {
+        setupType = "BEARISH_BREAKDOWN_CONTINUATION";
+        direction = "SHORT";
+      } else if (rangePosition >= 50) {
+        setupType = "BULL_FLAG_CONTINUATION";
+        direction = "LONG";
+      } else {
+        setupType = "KEY_SUPPORT_RECLAIM";
+        direction = "LONG";
+      }
+
+      const isPopular = POPULAR_WATCHLIST.includes(baseAsset);
+
       return {
         symbol: t.symbol,
         baseAsset,
@@ -90,33 +156,29 @@ export async function getMarketMovers(countPerCategory = 5, minVolumeUSDT = 5000
         highPrice,
         lowPrice,
         quoteVolume,
+        rangePosition,
+        setupType,
+        defaultDirection: direction,
+        isPopular,
+        category: direction === "SHORT" ? "loser" : "gainer",
       };
     });
 
-  // Top gainers (highest % change positive)
-  const gainers = [...validPairs]
-    .sort((a, b) => b.priceChangePercent - a.priceChangePercent)
-    .slice(0, countPerCategory)
-    .map((c, i) => ({
-      ...c,
-      category: "gainer",
-      rank: i + 1,
-      defaultDirection: "LONG",
-    }));
+  // Prioritize top popular high-liquidity coins first, followed by biggest volume momentum
+  const popularSetups = validPairs
+    .filter((p) => p.isPopular)
+    .sort((a, b) => b.quoteVolume - a.quoteVolume);
 
-  // Top losers (lowest % change negative)
-  const losers = [...validPairs]
-    .sort((a, b) => a.priceChangePercent - b.priceChangePercent)
-    .slice(0, countPerCategory)
-    .map((c, i) => ({
-      ...c,
-      category: "loser",
-      rank: i + 1,
-      defaultDirection: i % 2 === 0 ? "SHORT" : "DIP_BUY",
-    }));
+  const breakoutSetups = validPairs
+    .filter((p) => !p.isPopular && (p.setupType === "24H_BREAKOUT_MOMENTUM" || p.setupType === "OVERSOLD_SUPPORT_BOUNCE"))
+    .sort((a, b) => b.quoteVolume - a.quoteVolume);
 
-  // Rotation queue: 5 Gainers in order, followed by 5 Losers in order
-  const queue = [...gainers, ...losers];
+  // Combine to create an elite 10-coin technical rotation queue
+  const combined = [...popularSetups.slice(0, 7), ...breakoutSetups.slice(0, 3)];
+  const queue = combined.length >= count ? combined.slice(0, count) : validPairs.slice(0, count);
+
+  const gainers = queue.filter(q => q.defaultDirection !== "SHORT");
+  const losers = queue.filter(q => q.defaultDirection === "SHORT");
 
   return { gainers, losers, queue };
 }
@@ -126,105 +188,183 @@ export async function getMarketMovers(countPerCategory = 5, minVolumeUSDT = 5000
  */
 export async function getTopGainers(limit = 10, minVolumeUSDT = 500000) {
   const movers = await getMarketMovers(limit, minVolumeUSDT);
-  return movers.gainers;
+  return movers.queue;
 }
 
 /**
- * Build prompt for LLM strictly enforcing catchy dynamic openings,
- * explicit dollar price levels, and clickable cashtags ($SYMBOL).
+ * Build multi-format prompts based on content archetype:
+ * 1. TRADE_SIGNAL: Detailed TA with visual ASCII level map
+ * 2. INTERACTIVE_POLL: Voting & opinion debate to maximize comments
+ * 3. MARKET_NEWS_NARRATIVE: Macro & sector rotation breakdown
+ * 4. TRADER_MEME_PSYCHOLOGY: Viral humor & trader psychology
+ * 5. EDUCATIONAL_ALPHA: Actionable trading guides & pro tips
  */
-function buildTraderPrompt(coin) {
+function buildMultiFormatPrompt(coin, formatType = "TRADE_SIGNAL") {
   const currentPrice = coin.lastPrice;
   const changePct = coin.priceChangePercent;
   const symbol = coin.baseAsset;
-  const isGainer = coin.category === "gainer" || changePct >= 0;
+  const high24h = coin.highPrice;
+  const low24h = coin.lowPrice;
   const isShort = coin.defaultDirection === "SHORT";
+  const isDipBuy = coin.defaultDirection === "DIP_BUY";
 
-  let entryPrice = "";
-  let slPrice = "";
-  let tp1Price = "";
-  let tp2Price = "";
-  let openingHookSuggestions = "";
-  let tradeType = "";
+  const entryPoint = formatPrice(currentPrice);
+  const entryLow = formatPrice(currentPrice * 0.994);
+  const entryHigh = formatPrice(currentPrice * 1.006);
+  const slPrice = isShort ? formatPrice(currentPrice * 1.035) : formatPrice(currentPrice * 0.965);
+  const tp1Price = isShort ? formatPrice(currentPrice * 0.955) : formatPrice(currentPrice * 1.055);
+  const tp2Price = isShort ? formatPrice(currentPrice * 0.908) : formatPrice(currentPrice * 1.112);
+  const riskPct = "3.2%";
+  const rrRatio = "1:3.2";
 
-  if (isGainer) {
-    // Bullish Long Setup
-    tradeType = "BULLISH LONG MOMENTUM";
-    entryPrice = formatPrice(currentPrice);
-    slPrice = formatPrice(currentPrice * 0.952); // ~4.8% SL
-    tp1Price = formatPrice(currentPrice * 1.058); // ~5.8% TP1
-    tp2Price = formatPrice(currentPrice * 1.096); // ~9.6% TP2
+  if (formatType === "INTERACTIVE_POLL") {
+    return `You are a popular crypto creator on Binance Square creating an interactive community POLL/DEBATE to drive hundreds of comments.
 
-    openingHookSuggestions = `
-- "Taking a quick Long entry on $${symbol} around $${entryPrice}..."
-- "Just entered $${symbol} Long near $${entryPrice}..."
-- "Riding the volume breakout on $${symbol} at $${entryPrice}..."
-- "Scalp alert on $${symbol}! Entered Long at market around $${entryPrice}..."
-- "Bulls stepping up on $${symbol}, buying the continuation at $${entryPrice}..."
-- "Watching $${symbol} break local resistance, Longed around $${entryPrice}..."
-- "Sniping an intraday Long on $${symbol} at $${entryPrice}..."
-- "Quick momentum push on $${symbol}, in with Longs at $${entryPrice}..."
-`;
-  } else if (isShort) {
-    // Bearish Short Setup
-    tradeType = "BEARISH SHORT BREAKDOWN";
-    entryPrice = formatPrice(currentPrice);
-    slPrice = formatPrice(currentPrice * 1.048); // ~4.8% SL above entry
-    tp1Price = formatPrice(currentPrice * 0.945); // ~5.5% TP1
-    tp2Price = formatPrice(currentPrice * 0.898); // ~10.2% TP2
-
-    openingHookSuggestions = `
-- "Opening a Short scalp on $${symbol} around $${entryPrice}..."
-- "Shorting the heavy rejection on $${symbol} near $${entryPrice}..."
-- "Sellers taking over on $${symbol}, entered Short at $${entryPrice}..."
-- "Fading the bounce on $${symbol}, taking a Short position at $${entryPrice}..."
-- "Breakdown alert: Shorting $${symbol} at market price around $${entryPrice}..."
-- "Quick Short setup on $${symbol} around $${entryPrice}..."
-`;
-  } else {
-    // Oversold Relief Dip Buy
-    tradeType = "OVERSOLD RELIEF DIP BUY";
-    entryPrice = formatPrice(currentPrice);
-    slPrice = formatPrice(currentPrice * 0.952);
-    tp1Price = formatPrice(currentPrice * 1.062);
-    tp2Price = formatPrice(currentPrice * 1.115);
-
-    openingHookSuggestions = `
-- "Bidding the dip on $${symbol} near key support at $${entryPrice}..."
-- "Catching the oversold bounce on $${symbol} around $${entryPrice}..."
-- "RSI deeply oversold on $${symbol}, taking a relief scalp at $${entryPrice}..."
-- "High RR dip buy setup on $${symbol} around $${entryPrice}..."
-- "Sniping the support retest on $${symbol} at $${entryPrice}..."
-`;
-  }
-
-  return `You are a real, seasoned crypto day trader posting a live trade setup on Binance Square.
-
-TRADE SETUP INFO:
+COIN INFO:
 - Coin: $${symbol}
-- Trade Type: ${tradeType}
-- Exact Entry Price: $${entryPrice}
-- Exact Stop Loss (SL): $${slPrice}
-- Exact Take Profit 1 (TP1): $${tp1Price}
-- Exact Take Profit 2 (TP2): $${tp2Price}
+- Current Price: $${entryPoint}
+- 24h Trend: ${changePct > 0 ? "+" : ""}${changePct.toFixed(2)}%
 
-CATCHY OPENING HOOK OPTIONS (CHOOSE OR INVENT A UNIQUE ONE, DO NOT REPEAT "I'm Longed" EVERY TIME):
-${openingHookSuggestions}
+STRUCTURE:
+🔥 COMMUNITY POLL: Where is $${symbol} heading next? 🗳️
 
-STRUCTURE TO FOLLOW:
-[Catchy & varied 1st line with coin cashtag $${symbol} and entry price $${entryPrice}]
-My SL - $${slPrice}
-My TPs - $${tp1Price}, $${tp2Price}
-[1 natural sentence about chart / volume / momentum]
-Bro don't go all in, Use Proper SL And TP.
-[1 brief conclusion sentence e.g. "It's a quick scalp Trade Setup." or "Scalp mode active, protect your capital."]
-$${symbol}
+[2 concise sentences on current price action and the big debate between bulls and bears around $${entryPoint}]
+
+Cast your vote below:
+🅰️ Option A: [Bullish target / breakout level e.g. Rally to $${tp2Price}] 🚀
+🅱️ Option B: [Bearish pullback / support retest e.g. Drop to $${slPrice}] 🩸
+🅲 Option C: [Sideways consolidation / chop around $${entryPoint}] 🦀
+
+👇 Drop your vote (A, B, or C) and your reasoning in the comments! Top comments get pinned! 📌
+
+#${symbol} #BinanceSquare #CryptoPoll #TradingCommunity
 
 CRITICAL RULES:
-1. VARY THE OPENING LINE! Do NOT start every post with "I'm Longed". Use different catchy, fast-paced trader openings from the options above.
-2. ALWAYS use the exact DOLLAR PRICES ($${entryPrice}, $${slPrice}, $${tp1Price}, $${tp2Price}) in the signal lines. NEVER write percentages like "+5%" or "TP at 5%".
-3. ALWAYS include the coin cashtag like $${symbol} in the opening line AND on its own standalone line at the end (creates the clickable coin widget on Binance Square).
-4. Output STRICTLY the raw post text ready to publish. No title, no meta commentary, no markdown codeblocks.`;
+1. Strict focus on driving users to reply with A, B, or C in the comments.
+2. Must contain clickable cashtag $${symbol} and relevant hashtags.
+3. Output ONLY the raw post text ready to publish.`;
+  }
+
+  if (formatType === "MARKET_NEWS_NARRATIVE") {
+    return `You are a top Web3 & Crypto market analyst posting an insightful market breakdown & narrative update on Binance Square.
+
+CONTEXT:
+- Featured Coin: $${symbol} at $${entryPoint} (${changePct > 0 ? "+" : ""}${changePct.toFixed(2)}% 24h)
+- 24h High: $${formatPrice(high24h)} | 24h Low: $${formatPrice(low24h)}
+
+STRUCTURE:
+⚡ MARKET NARRATIVE UPDATE: $${symbol} Key Developments & Momentum 📊
+
+[3-4 punchy bullet points analyzing current sector rotation, on-chain/volume momentum, and key macro drivers behind $${symbol}'s recent price action around $${entryPoint}]
+
+🔑 Key Levels to Watch:
+• Major Resistance: $${tp1Price} - $${tp2Price}
+• Critical Support: $${slPrice}
+
+💡 Analyst Perspective: [1 strong forward-looking sentence on risk and strategy]
+
+👇 Are you accumulating or taking profits on $${symbol}? Share your strategy below!
+
+#${symbol} #CryptoNews #MarketUpdate #BinanceSquare
+
+CRITICAL RULES:
+1. Make it informative, analytical, and high-value.
+2. Must include clickable cashtag $${symbol} and hashtags.
+3. Output ONLY the raw post text ready to publish.`;
+  }
+
+  if (formatType === "TRADER_MEME_PSYCHOLOGY") {
+    return `You are a funny, relatable crypto trader posting a viral trading meme / psychology post on Binance Square.
+
+CONTEXT:
+- Coin: $${symbol}
+- Price: $${entryPoint}
+
+STRUCTURE:
+😂 The 4 Stages of Trading $${symbol} (Every Trader Knows This Pain):
+
+1️⃣ "I'll wait for the dip to buy." (Price skyrockets 🚀)
+2️⃣ "Okay, I FOMO'd in at $${entryPoint}." (Price immediately dumps 📉)
+3️⃣ "Just holding for the tech now..." (Staring at the 1-minute chart at 3 AM 💀)
+4️⃣ "It pumped 2% back to breakeven!" (Celebrates like won the lottery 🥳)
+
+Drop a '💯' if you have been personally attacked by this cycle! What's your craziest trade on $${symbol}?
+
+#${symbol} #CryptoMeme #TraderLife #BinanceSquare
+
+CRITICAL RULES:
+1. Extremely relatable, humorous, and engaging.
+2. Prompts easy engagement (e.g. drop 💯 or share a story).
+3. Output ONLY the raw post text ready to publish.`;
+  }
+
+  if (formatType === "EDUCATIONAL_ALPHA") {
+    return `You are a pro crypto trading mentor posting an actionable educational trading tip / alpha on Binance Square.
+
+CONTEXT:
+- Coin example: $${symbol} around $${entryPoint}
+
+STRUCTURE:
+🎓 PRO TRADING TIP: How to Spot Liquidity Sweeps vs Fakeouts on $${symbol} 🧠
+
+[3 punchy steps explaining a vital technical concept: e.g., how institutions hunt stop losses below $${slPrice} before reversing towards $${tp1Price}, volume confirmation, and candle close rules]
+
+📌 Golden Rule: Never chase the initial breakout candle. Wait for the retest and volume confirmation to protect your capital.
+
+👇 Did you know this rule? What's the #1 trading lesson you learned the hard way? Let's hear it below!
+
+#${symbol} #CryptoEducation #TradingTips #BinanceSquare
+
+CRITICAL RULES:
+1. Provide real actionable value that traders will bookmark and like.
+2. Keep it crisp and easy to digest with bullet points.
+3. Output ONLY the raw post text ready to publish.`;
+  }
+
+  // DEFAULT: TRADE_SIGNAL with ASCII Visual Level Map
+  return `You are a seasoned crypto technical analyst posting a high-probability live trade setup on Binance Square.
+
+DATA & TECHNICAL CONTEXT:
+- Coin: $${symbol}
+- Current Price: $${entryPoint}
+- 24h High: $${formatPrice(high24h)} | 24h Low: $${formatPrice(low24h)}
+- 24h Change: ${changePct > 0 ? "+" : ""}${changePct.toFixed(2)}%
+- Direction: ${isShort ? "SHORT" : "LONG"}
+- Entry Zone: $${entryLow} - $${entryHigh}
+- Stop Loss (SL): $${slPrice} (${riskPct} risk)
+- Take Profit 1 (TP1): $${tp1Price}
+- Take Profit 2 (TP2): $${tp2Price}
+- Risk-to-Reward: ${rrRatio}
+
+POST FORMATTING TEMPLATE (INCLUDE THE VISUAL LEVEL MAP):
+
+🚨 $${symbol} / USDT: High RR ${isShort ? "Short" : "Long"} Setup Developing! 📈
+
+[2-3 sentences of authentic technical chart rationale: market structure, volume expansion, liquidity sweep, or key support/resistance reaction]
+
+📊 Visual Level Map:
+[Target 2] ──────── $${tp2Price} 🎯 TP2 (${isShort ? "Extension Low" : "Range High"})
+[Target 1] ──────── $${tp1Price} 🎯 TP1 (Local Resistance)
+[Entry Area] ────── $${entryPoint} 📍 Current Market Price
+[Invalidation] ──── $${slPrice} 🛡️ SL (${riskPct} Risk)
+
+🎯 Trade Parameters:
+• Entry Zone: $${entryLow} - $${entryHigh}
+• Invalidation (SL): $${slPrice} (${riskPct} risk)
+• Target 1: $${tp1Price}
+• Target 2: $${tp2Price}
+📊 Risk-to-Reward: ${rrRatio}
+
+💡 Trade Plan: Lock partials at TP1 and trail stop to entry to keep trade risk-free. Never overleverage.
+
+👇 What's your target for $${symbol} this week? Drop your prediction in the comments!
+
+#${symbol} #CryptoTrading #BinanceSquare #TechnicalAnalysis
+
+CRITICAL INSTRUCTIONS:
+1. Always include the exact dollar prices and the formatted Visual Level Map.
+2. Make sure to include the clickable cashtag $${symbol} and ending hashtag #${symbol}.
+3. Output ONLY the raw post text ready to publish.`;
 }
 
 /**
@@ -241,7 +381,7 @@ async function generateWithOpenRouter(prompt, apiKey, modelName = "qwen/qwen-2.5
         content: prompt,
       },
     ],
-    temperature: 0.9, // higher temperature for natural creative hook variety
+    temperature: 0.9,
     max_tokens: 1500,
   };
 
@@ -332,10 +472,24 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
 }
 
 /**
- * Universal Post Generator supporting Gemini or OpenRouter
+ * Universal Post Generator supporting Gemini or OpenRouter with dynamic format selection
  */
 export async function generateTraderPost(coin, allMovers, options = {}) {
-  const prompt = buildTraderPrompt(coin);
+  // Content format rotation (Signals, Polls, News, Memes, Educational)
+  const availableFormats = [
+    "TRADE_SIGNAL",
+    "TRADE_SIGNAL",
+    "INTERACTIVE_POLL",
+    "MARKET_NEWS_NARRATIVE",
+    "TRADER_MEME_PSYCHOLOGY",
+    "EDUCATIONAL_ALPHA"
+  ];
+
+  // Pick format based on option override or random weighted selection
+  const formatType = options.format || availableFormats[Math.floor(Math.random() * availableFormats.length)];
+  console.log(`[ai] Generating post content with format: [${formatType}] for $${coin.baseAsset}`);
+
+  const prompt = buildMultiFormatPrompt(coin, formatType);
   
   const rawProvider = String(options.provider || "").trim().toLowerCase();
   const isGemini = rawProvider === "1" || rawProvider === "gemini";
