@@ -531,6 +531,41 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
 /**
  * Universal Post Generator supporting Gemini or OpenRouter with 30% Signal / 70% News & Engagement mix
  */
+/**
+ * Resolve high-quality relevant image URL for news, coin ecosystem, and target hit posts.
+ */
+export function resolvePostImageUrl(coin, formatType = "") {
+  const sym = (coin?.baseAsset || "").toLowerCase();
+
+  if (formatType === "GOVT_MACRO_NEWS") {
+    const macroImages = [
+      "https://images.unsplash.com/photo-1621416894569-0f39ed31d247?w=800&auto=format&fit=crop&q=80", // Bitcoin / Macro
+      "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop&q=80", // Trading / Federal Reserve
+      "https://images.unsplash.com/photo-1642543492481-44e81e3914a7?w=800&auto=format&fit=crop&q=80"  // Market Liquidity
+    ];
+    return macroImages[Math.floor(Math.random() * macroImages.length)];
+  }
+
+  if (formatType === "WAR_GEOPOLITICS") {
+    const warImages = [
+      "https://images.unsplash.com/photo-1639762681485-074b7f938ba0?w=800&auto=format&fit=crop&q=80", // Global Network / Crypto Shock
+      "https://images.unsplash.com/photo-1622979135225-d2ba269bc1df?w=800&auto=format&fit=crop&q=80"  // Market Volatility
+    ];
+    return warImages[Math.floor(Math.random() * warImages.length)];
+  }
+
+  // Coin Ecosystem News & Target Hit: High-res crypto icons & graphics
+  if (sym) {
+    return `https://assets.coincap.io/assets/icons/${sym}@2x.png`;
+  }
+
+  return null;
+}
+
+/**
+ * Universal Post Generator supporting Gemini or OpenRouter:
+ * 50% Top Gainer Signals (>45% Short, <45% Long), 15% Congrats Target Hit, 35% News/Macro/War
+ */
 export async function generateTraderPost(coin, allMovers, options = {}) {
   // 50% Top Gainer Signals (>45% Short, <45% Long), 15% Target Hit Congrats, 35% High-Impact News/Macro
   const weightedFormats = [
@@ -551,39 +586,54 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
   console.log(`[ai] Generating post content with format: [${formatType}] for $${coin.baseAsset} (24h: ${coin.priceChangePercent > 0 ? "+" : ""}${coin.priceChangePercent.toFixed(1)}%)`);
 
   const prompt = buildMultiFormatPrompt(coin, formatType);
+  const imageUrl = resolvePostImageUrl(coin, formatType);
   
   const rawProvider = String(options.provider || "").trim().toLowerCase();
   const isGemini = rawProvider === "1" || rawProvider === "gemini";
   const isOpenRouter = rawProvider === "openrouter" || rawProvider === "2" || (!isGemini && options.openrouterKey);
 
+  let text = "";
   if (isOpenRouter) {
     const key = options.openrouterKey || options.geminiKey;
     if (!key) {
       throw new Error("OPENROUTER_API_KEY is missing in .env");
     }
     const model = options.model || "qwen/qwen-2.5-7b-instruct";
-    return await generateWithOpenRouter(prompt, key, model);
+    text = await generateWithOpenRouter(prompt, key, model);
+  } else {
+    const key = options.geminiKey || options.openrouterKey;
+    if (!key) {
+      throw new Error("GEMINI_API_KEY is missing in .env");
+    }
+    text = await generateWithGemini(prompt, key, options.model);
   }
 
-  const key = options.geminiKey || options.openrouterKey;
-  if (!key) {
-    throw new Error("GEMINI_API_KEY is missing in .env");
-  }
-  return await generateWithGemini(prompt, key, options.model);
+  // If caller expects a simple string, return text with metadata attached
+  const result = new String(text);
+  result.text = text;
+  result.formatType = formatType;
+  result.imageUrl = imageUrl;
+  result.images = imageUrl ? [imageUrl] : [];
+  return result;
 }
 
 /**
- * Publish post to Binance Square OpenAPI.
- * @param {string} content Post text
+ * Publish post to Binance Square OpenAPI (supports text and images).
+ * @param {string|object} content Post text or object containing { text, imageUrl, images }
  * @param {string} apiKey Binance Square API Key
+ * @param {object} [options] Optional publish options e.g. { imageUrl, images }
  * @returns {Promise<object>}
  */
-export async function publishToSquare(content, apiKey) {
+export async function publishToSquare(content, apiKey, options = {}) {
   console.log("[publish] Publishing post to Binance Square...");
+
+  const rawText = typeof content === "object" && content.text ? content.text : String(content);
+  const imageUrl = options.imageUrl || (typeof content === "object" ? content.imageUrl : null);
+  const images = options.images || (typeof content === "object" && content.images ? content.images : (imageUrl ? [imageUrl] : []));
 
   // 1. Sanitize cashtags ($SYMBOL): Binance limits to max 2 distinct coin pairs per post
   const seenCoins = new Set();
-  let sanitized = content.replace(/\$([A-Za-z0-9]+)/g, (match, symbol) => {
+  let sanitized = rawText.replace(/\$([A-Za-z0-9]+)/g, (match, symbol) => {
     const symUpper = symbol.toUpperCase();
     if (seenCoins.has(symUpper)) return match;
     if (seenCoins.size < 2) {
@@ -603,11 +653,24 @@ export async function publishToSquare(content, apiKey) {
     return tag; // drop # to avoid hashtag limit
   });
 
+  let richContent = sanitized;
+  if (images && Array.isArray(images) && images.length > 0) {
+    // Embed markdown image tag into rich content so Binance Square web/app renderer shows the image
+    richContent = `${sanitized}\n\n![Market Visual](${images[0]})`;
+  }
+
   const payload = {
     bodyTextOnly: sanitized,
     contentType: 1,
-    content: sanitized,
+    content: richContent,
   };
+
+  // Attach images to payload
+  if (images && Array.isArray(images) && images.length > 0) {
+    payload.picList = images;
+    payload.pics = images;
+    console.log(`[publish] 🖼️ Attached ${images.length} image(s) to post: ${images[0]}`);
+  }
 
   const res = await fetch(BINANCE_SQUARE_PUBLISH_URL, {
     method: "POST",
