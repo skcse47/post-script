@@ -79,8 +79,8 @@ async function runTest() {
       console.log(`   ${i + 1}. $${l.baseAsset.padEnd(8)}: $${formatPrice(l.lastPrice)} (${l.priceChangePercent.toFixed(2)}%) Vol: $${(l.quoteVolume / 1_000_000).toFixed(2)}M`);
     });
 
-    // Pick top gainer for testing
-    const testCoin = movers.gainers[0];
+    // Pick top coin from queue for testing
+    const testCoin = movers.queue[0] || movers.gainers[0];
     console.log(`\n[2/3] 🧠 Generating signal setup for $${testCoin.baseAsset} via ${LLM_PROVIDER.toUpperCase()} (${LLM_MODEL})...`);
 
     const postContent = await generateTraderPost(testCoin, movers.queue, {

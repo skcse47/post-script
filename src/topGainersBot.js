@@ -73,13 +73,15 @@ export function formatPrice(num) {
 }
 
 /**
- * Fetch diverse market movers and technical candidates across the 80+ coin universe.
- * @param {number} count Number of coins to return in the queue
+ * Fetch top gainers from Binance + active market movers.
+ * - >45% 24h pump: Classified as SHORT (overextended pump rejection)
+ * - <45% 24h pump: Classified as LONG (momentum continuation)
+ * @param {number} count Number of coins to return
  * @param {number} minVolumeUSDT Minimum 24h volume
  * @returns {Promise<{gainers: Array<object>, losers: Array<object>, queue: Array<object>}>}
  */
 export async function getMarketMovers(count = 10, minVolumeUSDT = 500_000) {
-  console.log("[market] Scanning diverse altcoin universe & technical setups...");
+  console.log("[market] Scanning real-time Binance Top Gainers & Movers...");
   
   let tickers = null;
   const errors = [];
@@ -130,14 +132,18 @@ export async function getMarketMovers(count = 10, minVolumeUSDT = 500_000) {
       const quoteVolume = parseFloat(t.quoteVolume);
       const baseAsset = t.symbol.replace("USDT", "");
       
-      const range = highPrice - lowPrice;
-      const rangePosition = range > 0 ? ((lastPrice - lowPrice) / range) * 100 : 50;
-
+      // USER RULE:
+      // If pumped > 45% -> SHORT signal (Overextended pump blow-off top)
+      // If gained < 45% -> LONG signal (Momentum continuation)
       let direction = "LONG";
-      if (rangePosition <= 30 || priceChangePercent < -4) {
-        direction = Math.random() > 0.5 ? "SHORT" : "DIP_BUY";
-      } else if (rangePosition >= 75) {
+      let isOverpumped = false;
+      if (priceChangePercent >= 45.0) {
+        direction = "SHORT";
+        isOverpumped = true;
+      } else if (priceChangePercent > 0) {
         direction = "LONG";
+      } else {
+        direction = "DIP_BUY";
       }
 
       const isUniverseCoin = WATCHLIST_UNIVERSE.includes(baseAsset);
@@ -150,27 +156,32 @@ export async function getMarketMovers(count = 10, minVolumeUSDT = 500_000) {
         highPrice,
         lowPrice,
         quoteVolume,
-        rangePosition,
+        isOverpumped,
         defaultDirection: direction,
         isUniverseCoin,
         category: direction === "SHORT" ? "loser" : "gainer",
       };
     });
 
-  // Filter universe coins and shuffle to prevent repeating the same coins every cycle
-  const universeCoins = validPairs.filter((p) => p.isUniverseCoin);
-  const otherHighVol = validPairs.filter((p) => !p.isUniverseCoin && p.quoteVolume > 2_000_000);
+  // 1. Real-time Top Gainers on Binance
+  const topGainers = [...validPairs]
+    .filter((p) => p.priceChangePercent > 5)
+    .sort((a, b) => b.priceChangePercent - a.priceChangePercent);
 
-  const shuffledUniverse = shuffleArray(universeCoins);
-  const shuffledOthers = shuffleArray(otherHighVol);
+  // 2. High-liquidity universe coins
+  const universeCoins = shuffleArray(validPairs.filter((p) => p.isUniverseCoin));
 
-  // Combine shuffled altcoins + high volume gems
-  const queue = [...shuffledUniverse.slice(0, 8), ...shuffledOthers.slice(0, 4)].slice(0, count);
+  // Build balanced queue: Top Gainers first (for 50% gainer signals) + trending universe coins
+  const queue = [...topGainers.slice(0, 6), ...universeCoins.slice(0, 4)].slice(0, count);
 
-  const gainers = queue.filter(q => q.defaultDirection !== "SHORT");
+  const gainers = queue.filter(q => q.defaultDirection === "LONG");
   const losers = queue.filter(q => q.defaultDirection === "SHORT");
 
-  return { gainers, losers, queue };
+  return { 
+    gainers: gainers.length > 0 ? gainers : queue, 
+    losers, 
+    queue 
+  };
 }
 
 /**
@@ -184,11 +195,13 @@ export async function getTopGainers(limit = 10, minVolumeUSDT = 500000) {
 /**
  * Build human-written, urgent, concise, high-converting posts.
  * Formats:
- * 1. TRADE_SIGNAL (30%): Serious, urgent, short human trader format with Entry, SL, TP1-3
- * 2. GOVT_MACRO_NEWS (25%): US Government, SEC regulations, Federal Reserve & interest rates impact
- * 3. WAR_GEOPOLITICS (20%): War / geopolitical conflict tensions, safe-haven flows, Bitcoin volatility
- * 4. COIN_ECOSYSTEM_NEWS (15%): Big ecosystem news, updates & catalysts for the coin
- * 5. COMMUNITY_DEBATE (10%): Interactive discussion on market direction
+ * 1. TRADE_SIGNAL (50%): 
+ *    - Pump > 45%: SHORT signal (rejection from highs)
+ *    - Gain < 45%: LONG signal (momentum continuation)
+ * 2. TARGET_HIT_CONGRATS (15%): Celebration post with winning emojis for hit TP targets
+ * 3. GOVT_MACRO_NEWS (15%): US Government, SEC & Fed rate impact
+ * 4. WAR_GEOPOLITICS (10%): War / geopolitical conflict tensions & Bitcoin volatility
+ * 5. COIN_ECOSYSTEM_NEWS (10%): Coin ecosystem developments & catalysts
  */
 function buildMultiFormatPrompt(coin, formatType = "TRADE_SIGNAL") {
   const currentPrice = coin.lastPrice;
@@ -196,18 +209,54 @@ function buildMultiFormatPrompt(coin, formatType = "TRADE_SIGNAL") {
   const symbol = coin.baseAsset;
   const high24h = coin.highPrice;
   const low24h = coin.lowPrice;
-  const isShort = coin.defaultDirection === "SHORT";
+  const isShort = coin.defaultDirection === "SHORT" || changePct >= 45.0;
 
   const entryPoint = formatPrice(currentPrice);
   const entryLow = formatPrice(currentPrice * 0.993);
   const entryHigh = formatPrice(currentPrice * 1.007);
-  const slPrice = isShort ? formatPrice(currentPrice * 1.042) : formatPrice(currentPrice * 0.958);
-  const tp1Price = isShort ? formatPrice(currentPrice * 0.965) : formatPrice(currentPrice * 1.042);
-  const tp2Price = isShort ? formatPrice(currentPrice * 0.925) : formatPrice(currentPrice * 1.085);
-  const tp3Price = isShort ? formatPrice(currentPrice * 0.880) : formatPrice(currentPrice * 1.135);
+  const slPrice = isShort ? formatPrice(currentPrice * 1.048) : formatPrice(currentPrice * 0.952);
+  const tp1Price = isShort ? formatPrice(currentPrice * 0.955) : formatPrice(currentPrice * 1.048);
+  const tp2Price = isShort ? formatPrice(currentPrice * 0.910) : formatPrice(currentPrice * 1.095);
+  const tp3Price = isShort ? formatPrice(currentPrice * 0.860) : formatPrice(currentPrice * 1.155);
 
   // Pool of related major cashtags to mention for search reach (Binance limits cashtags to max 2 per post)
   const relatedTags = symbol === "BTC" ? "$ETH" : "$BTC";
+
+  if (formatType === "TARGET_HIT_CONGRATS") {
+    const profitPct = (Math.abs(changePct) > 5 ? Math.abs(changePct) * 0.6 : 18.5).toFixed(1);
+    return `You are a victorious, top-performing crypto day trader celebrating a successful trade target hit on Binance Square.
+
+CONTEXT:
+- Coin: $${symbol}
+- Current Market Price: $${entryPoint}
+- Estimated Profit Run: +${profitPct}%
+- TP Targets Smashed: TP1 ($${tp1Price}) & TP2 ($${tp2Price})
+
+OUTPUT FORMAT TO EXACTLY FOLLOW (CELEBRATORY WITH WINNING EMOJIS):
+
+🎯 TARGET HIT! $${symbol} TP1 & TP2 SMASHED! 🚀🔥💰
+
+What a clean, textbook move on $${symbol}! 
+Our setup just delivered a massive +${profitPct}% profit run! 🥂💸
+
+✅ Entry Zone: Secured around $${entryLow}
+✅ TP1 Hit: $${tp1Price} 🎯
+✅ TP2 Hit: $${tp2Price} 🎯
+🔥 24H Peak: $${formatPrice(high24h)} 🚀
+
+💡 Trade Plan: Move your Stop Loss to Entry now or lock partial profits to make this trade 100% risk-free. Never let a green trade turn red!
+
+Drop a '💰' in the comments if you caught this move with me! 👇
+Which coin should we snipe next? Drop your requests below! 
+
+Market context: ${relatedTags}
+#${symbol} #TargetHit #CryptoProfits #BinanceSquareFamily
+
+CRITICAL RULES:
+1. Enthusiastic, confident trader tone with great emojis (🎯 🔥 💰 🚀 🥂 💸).
+2. Clean spacing, NO ASCII boxes.
+3. Output ONLY the raw post text ready to publish.`;
+  }
 
   if (formatType === "GOVT_MACRO_NEWS") {
     return `You are a savvy crypto macro analyst on Binance Square posting an urgent, human-written update on US Government, Federal Reserve, and regulatory news impact on crypto.
@@ -227,7 +276,7 @@ STYLE INSTRUCTIONS:
    - Relevant hashtags: #${symbol} #CryptoNews #USRegulation #FedRateCuts #BinanceSquareFamily
 
 CRITICAL RULES:
-- NO robotic AI filler or generic disclaimers like "in the fast evolving world of crypto".
+- NO robotic AI filler.
 - Keep it concise, punchy, and readable on mobile.
 - Output ONLY the raw post text ready to publish.`;
   }
@@ -283,38 +332,15 @@ CRITICAL RULES:
 - Output ONLY the raw post text ready to publish.`;
   }
 
-  if (formatType === "COMMUNITY_DEBATE") {
-    return `You are a popular crypto creator on Binance Square posting an interactive debate to drive comments.
-
-CONTEXT:
-- Coin: $${symbol} ($${entryPoint}, 24h change: ${changePct > 0 ? "+" : ""}${changePct.toFixed(2)}%)
-
-STRUCTURE:
-🚨 $${symbol} BREAKOUT OR FAKEOUT? What's your play? 🤔
-
-$${symbol} is testing a crucial zone around $${entryPoint}. Buyers are fighting to hold the line while bears are trying to push a deeper retest towards $${slPrice}.
-
-What is your immediate move?
-1️⃣ Buying the continuation to $${tp2Price} 🚀
-2️⃣ Waiting for a lower retest near $${slPrice} 🩸
-3️⃣ Sitting in USDT on the sidelines ⏳
-
-Drop 1, 2, or 3 below with your target! Let's see where the community stands 👇
-Related: ${relatedTags}
-#${symbol} #BinanceSquare #CryptoTrading #Altcoins
-
-CRITICAL RULES:
-- Clean, short, directly aimed at driving replies.
-- Output ONLY the raw post text.`;
-  }
-
-  // DEFAULT: 30% TRADE_SIGNAL — Urgent, Human, Clean Format (matching user's winning example)
-  if (isShort) {
+  // DEFAULT: TRADE_SIGNAL (50%)
+  // If coin pumped > 45% -> SHORT SETUP
+  if (isShort || changePct >= 45.0) {
     return `You are a real, seasoned crypto day trader posting a live SHORT trade signal on Binance Square.
 
 TRADE DATA:
 - Coin: $${symbol}
 - Current Price: $${entryPoint}
+- 24h Pump: +${changePct.toFixed(1)}% (Overextended blow-off top!)
 - Rejection Level: $${formatPrice(high24h)}
 - Entry Zone: ${entryLow} – ${entryHigh}
 - Stop Loss: ${slPrice}
@@ -322,12 +348,12 @@ TRADE DATA:
 - TP2: ${tp2Price}
 - TP3: ${tp3Price}
 
-OUTPUT FORMAT TO EXACTLY FOLLOW (SIMILAR TO THIS PROVEN WINNING FORMAT):
+OUTPUT FORMAT TO EXACTLY FOLLOW:
 
-🚨 $${symbol} SHORT SETUP – Rejection Confirmed
+🚨 $${symbol} SHORT SETUP – Overextended Pump Rejection 📉
 
-$${symbol} just got rejected hard from ${formatPrice(high24h)}.
-Sellers are stepping in with heavy volume.
+$${symbol} is up +${changePct.toFixed(1)}% and just got rejected hard from ${formatPrice(high24h)}.
+Sellers and profit-takers are stepping in with heavy volume.
 
 🐻 SHORT SIGNAL
 Entry: ${entryLow} – ${entryHigh}
@@ -336,10 +362,10 @@ TP1: ${tp1Price}
 TP2: ${tp2Price}
 TP3: ${tp3Price}
 
-Price failed to hold the highs and is showing clear momentum weakness.
+Price failed to sustain the peak and is showing clear momentum exhaustion.
 If it stays below ${entryHigh}, the next leg down can be sharp.
 
-High risk setup after the pump. Size small + use strict SL.
+High risk setup after a massive pump. Size small + use strict SL.
 Who’s shorting $${symbol} with me? 👇
 
 Market context: ${relatedTags}
@@ -353,12 +379,13 @@ CRITICAL RULES:
 4. Output ONLY the raw post text ready to publish.`;
   }
 
-  // Bullish Long Signal
+  // If coin gained < 45% -> LONG SETUP
   return `You are a real, seasoned crypto day trader posting a live LONG trade signal on Binance Square.
 
 TRADE DATA:
 - Coin: $${symbol}
 - Current Price: $${entryPoint}
+- 24h Change: +${changePct.toFixed(1)}% (Solid Momentum)
 - Support Level: $${formatPrice(low24h)}
 - Entry Zone: ${entryLow} – ${entryHigh}
 - Stop Loss: ${slPrice}
@@ -366,12 +393,12 @@ TRADE DATA:
 - TP2: ${tp2Price}
 - TP3: ${tp3Price}
 
-OUTPUT FORMAT TO EXACTLY FOLLOW (SIMILAR TO THIS PROVEN WINNING FORMAT):
+OUTPUT FORMAT TO EXACTLY FOLLOW:
 
-🚨 $${symbol} LONG SETUP – Support Hold Confirmed 🔥
+🚨 $${symbol} LONG SETUP – Momentum Continuation Confirmed 🔥
 
-$${symbol} is holding the key support zone firmly around ${formatPrice(low24h)}.
-Buyers are stepping in and absorption volume is increasing.
+$${symbol} is gaining strong buyer momentum (+${changePct.toFixed(1)}%) and holding above support at ${formatPrice(low24h)}.
+Buyers are absorbing dips with rising volume.
 
 🐂 LONG SIGNAL
 Entry: ${entryLow} – ${entryHigh}
@@ -380,8 +407,8 @@ TP1: ${tp1Price}
 TP2: ${tp2Price}
 TP3: ${tp3Price}
 
-Market structure is shifting bullish with higher lows on local timeframes.
-As long as it holds above ${slPrice}, the upside expansion targets are in play.
+Market structure is bullish with higher lows on local timeframes.
+As long as it holds above ${slPrice}, the upside continuation targets are in play.
 
 Manage your risk properly. Don't chase green candles + use SL.
 Are you Long on $${symbol} or waiting? Drop your targets below 👇
@@ -505,22 +532,23 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
  * Universal Post Generator supporting Gemini or OpenRouter with 30% Signal / 70% News & Engagement mix
  */
 export async function generateTraderPost(coin, allMovers, options = {}) {
-  // 30% Trade Signals, 70% News/Macro/War/Engagement
+  // 50% Top Gainer Signals (>45% Short, <45% Long), 15% Target Hit Congrats, 35% High-Impact News/Macro
   const weightedFormats = [
-    "TRADE_SIGNAL",          // ~30%
+    "TRADE_SIGNAL",          // 50% Gainer Signals
     "TRADE_SIGNAL",
     "TRADE_SIGNAL",
-    "GOVT_MACRO_NEWS",       // ~25%
+    "TRADE_SIGNAL",
+    "TRADE_SIGNAL",
+    "TARGET_HIT_CONGRATS",   // 15% Target Smashed Congrats
+    "TARGET_HIT_CONGRATS",
+    "GOVT_MACRO_NEWS",       // 15% US Govt / SEC / Fed
     "GOVT_MACRO_NEWS",
-    "WAR_GEOPOLITICS",       // ~20%
-    "WAR_GEOPOLITICS",
-    "COIN_ECOSYSTEM_NEWS",   // ~15%
-    "COMMUNITY_DEBATE",      // ~10%
-    "COIN_ECOSYSTEM_NEWS"
+    "WAR_GEOPOLITICS",       // 10% War & Geopolitics
+    "COIN_ECOSYSTEM_NEWS"    // 10% Coin Ecosystem News
   ];
 
   const formatType = options.format || weightedFormats[Math.floor(Math.random() * weightedFormats.length)];
-  console.log(`[ai] Generating post content with format: [${formatType}] for $${coin.baseAsset}`);
+  console.log(`[ai] Generating post content with format: [${formatType}] for $${coin.baseAsset} (24h: ${coin.priceChangePercent > 0 ? "+" : ""}${coin.priceChangePercent.toFixed(1)}%)`);
 
   const prompt = buildMultiFormatPrompt(coin, formatType);
   
