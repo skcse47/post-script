@@ -237,7 +237,7 @@ if (lastPostTime > 0 && elapsedMinutes < 25) {
 }
 
 // Schedule to run exactly every 30 minutes (:00, :30)
-cron.schedule("*/3 * * * *", () => {
+cron.schedule("*/20 * * * *", () => {
   executeRoundRobinCycle();
 });
 
