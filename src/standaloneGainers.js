@@ -142,6 +142,7 @@ export async function executeRoundRobinCycle() {
   isRunning = true;
   const startTime = new Date().toISOString();
 
+  try {
     // 1. Always fetch real-time Top Altcoin Gainers from Binance
     console.log(`\n════════════════════════════════════════════════════════════`);
     console.log(`🔄 [${startTime}] Scanning Live Top 3 Binance Altcoin Gainers`);
