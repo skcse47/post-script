@@ -652,15 +652,16 @@ export async function publishToSquare(content, apiKey, options = {}) {
     if (hashtagCount <= 3) {
       return match;
     }
-    return tag; // drop # to avoid hashtag limit
+    return ""; // remove excess hashtags cleanly
   });
 
-  // 3. Remove all em-dashes and double-dashes to keep formatting natural and human
+  // 3. Remove dashes while strictly preserving line breaks and clean paragraph spacing
   sanitized = sanitized
     .replace(/--+/g, " ")
-    .replace(/\s*[—–]\s*/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/ \n /g, "\n")
+    .replace(/[—–]/g, " ")
+    .replace(/[ \t]+/g, " ")               // Collapse multiple spaces on same line
+    .replace(/\n\s*\n\s*\n+/g, "\n\n")     // Max 1 empty line between paragraphs
+    .replace(/([^\n])\s*(✅|🔥|💡|🎯|🚨|🐂|🐻)/g, "$1\n\n$2") // Ensure clean line break before major emojis/sections
     .trim();
 
   let richContent = sanitized;
