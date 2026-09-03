@@ -29,17 +29,16 @@ const GEMINI_CANDIDATE_MODELS = [
   "gemini-pro"
 ];
 
-// Diverse watchlist of 80+ top traded & trending coins across AI, Layer 1s, Memes, DeFi, and RWA
+// Diverse watchlist of 80+ top traded & trending coins across AI, Layer 1s, Memes, DeFi, and RWA (NO BNB, ETH, XRP, BTC, SOL)
 const WATCHLIST_UNIVERSE = [
-  "SOL", "SUI", "PEPE", "DOGE", "ADA", "AVAX", "NEAR", "LINK", "SHIB", "FET",
+  "SUI", "PEPE", "DOGE", "ADA", "AVAX", "NEAR", "LINK", "SHIB", "FET",
   "APT", "RENDER", "INJ", "WIF", "TIA", "ARB", "OP", "DOT", "LTC", "GALA",
   "SEI", "FLOKI", "BONK", "TON", "FTM", "JASMY", "ENA", "PENDLE", "JTO", "PYTH",
   "WLD", "ICP", "STX", "KAS", "T", "THETA", "AAVE", "CRV", "UNI", "DYDX",
   "ONDO", "OM", "BEAM", "RUNE", "CHZ", "BLUR", "STRK", "ZK", "NOT", "BANANA",
   "TAO", "TURBO", "MEW", "BRETT", "POPCAT", "NEIRO", "1000SATS", "ORDI", "TRUMP",
   "CFX", "FIL", "SAND", "MANA", "AXS", "EOS", "KSM", "FLOW", "QNT", "ALGO",
-  "ZRO", "IO", "LISTA", "BB", "REZ", "NOT", "IO", "TNSR", "W", "SAGA",
-  "BTC", "ETH", "BNB", "XRP"
+  "ZRO", "IO", "LISTA", "BB", "REZ", "NOT", "IO", "TNSR", "W", "SAGA", "HEMI", "EGLD", "MUBARAK"
 ];
 
 // Helper: Shuffle array for maximum coin variety
@@ -52,7 +51,11 @@ function shuffleArray(array) {
   return arr;
 }
 
-/// Blacklist stablecoins, major benchmark coins, and leveraged tokens from being primary signal target
+// Strictly BANNED from primary signal targets (Never post about BNB, ETH, XRP, BTC, SOL)
+const BANNED_BASE_ASSETS = new Set([
+  "BNB", "ETH", "XRP", "BTC", "SOL", "USDT", "USDC", "FDUSD", "TUSD", "BUSD", "EUR", "DAI", "WBTC", "SUSD", "UST"
+]);
+
 const EXCLUDED_SYMBOLS = new Set([
   "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT",
   "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT", "EURUSDT",
@@ -74,12 +77,12 @@ export function formatPrice(num) {
 }
 
 /**
- * Fetch top real-time altcoin gainers from Binance.
+ * Fetch top real-time altcoin gainers from Binance (Strictly NO BNB, ETH, XRP, BTC).
  * - >45% 24h pump: Classified as SHORT (overextended pump rejection)
  * - <45% 24h pump: Classified as LONG (momentum continuation)
  * @param {number} count Number of coins to return
  * @param {number} minVolumeUSDT Minimum 24h volume ($1M default)
- * @returns {Promise<{gainers: Array<object>, losers: Array<object>, queue: Array<object>}>}
+ * @returns {Promise<{gainers: Array<object>, losers: Array<object>, top3: Array<object>, queue: Array<object>}>}
  */
 export async function getMarketMovers(count = 10, minVolumeUSDT = 1_000_000) {
   console.log("[market] Scanning real-time Binance Top Altcoin Gainers...");
@@ -120,7 +123,11 @@ export async function getMarketMovers(count = 10, minVolumeUSDT = 1_000_000) {
         return false;
       }
       const quoteVol = parseFloat(t.quoteVolume || "0");
-      return quoteVol >= minVolumeUSDT;
+      if (quoteVol < minVolumeUSDT) return false;
+
+      const baseAsset = t.symbol.replace("USDT", "");
+      if (BANNED_BASE_ASSETS.has(baseAsset)) return false; // Strictly ban BNB, ETH, XRP, BTC
+      return true;
     })
     .map((t) => {
       const lastPrice = parseFloat(t.lastPrice);
@@ -196,7 +203,7 @@ export async function getTopGainers(limit = 10, minVolumeUSDT = 500000) {
 }
 
 /**
- * Build human-written, urgent, concise, high-converting posts.
+ * Build human-written, urgent, concise, high-converting posts without dashes.
  * Formats:
  * 1. TRADE_SIGNAL (30%): Fast momentum breakout signal for active gainers
  * 2. FOMO_PUMP_CALL (30%): Ultra-short (<150 letters) technical hype on Top 3 pumping coins
@@ -223,28 +230,27 @@ function buildMultiFormatPrompt(coin, formatType = "TRADE_SIGNAL", allMovers = [
   const otherTopGainer = (allMovers || [])
     .filter((m) => m.baseAsset && m.baseAsset !== symbol && m.priceChangePercent > 5)
     .slice(0, 1)
-    .map((m) => `$${m.baseAsset}`)[0] || "$BTC";
-
-  const relatedTags = "$BTC";
+    .map((m) => `$${m.baseAsset}`)[0] || "";
 
   if (formatType === "FOMO_PUMP_CALL") {
-    return `You are a high-speed crypto day trader on Binance Square writing an ultra-short technical micro-post (STRICTLY UNDER 135 CHARACTERS) for the top gainer $${symbol}.
+    return `You are a real crypto day trader on Binance Square writing an ultra-short technical micro-post (STRICTLY UNDER 135 CHARACTERS) for the top gainer $${symbol}.
 
 CONTEXT:
 - Featured Top Gainer: $${symbol} (+${changePct.toFixed(1)}%, price: $${entryPoint})
-- Also pumping in Top 3: ${otherTopGainer}
+${otherTopGainer ? `- Also pumping in Top 3: ${otherTopGainer}` : ''}
 
-RULES:
+CRITICAL RULES:
 1. Do NOT give defined price targets (NO TP1, NO TP2, NO list).
 2. Write a single punchy technical observation that creates massive buying urgency (e.g., whale absorption, breaking 4H resistance, order book cleared to upside, short squeeze).
-3. MAXIMUM LENGTH: UNDER 135 CHARACTERS TOTAL. (1-2 short lines max).
+3. DO NOT USE DASHES (-- or em-dashes). Keep it raw and human.
+4. MAXIMUM LENGTH: UNDER 135 CHARACTERS TOTAL.
 
 EXAMPLES:
 🔥 $${symbol} breaking massive 4H resistance! Whales absorbing all sell orders. Next leg loading! 🚀 #Altcoins #Crypto
-👀 $${symbol} volume just spiked 400%! Order book cleared to upside. Don't fade this pump 🐂 #${symbol} #Crypto
+👀 $${symbol} volume just spiked 400%! Order book cleared to upside. Don't fade this pump 🐂 #${symbol}
 ⚡ $${symbol} printing god candles on 1H! Huge buy wall at $${entryLow}. Shorts getting squeezed hard! 🚀 #${symbol}
 
-Output ONLY the raw text (under 135 characters):`;
+Output ONLY raw text (under 135 characters, NO dashes):`;
   }
 
   if (formatType === "TARGET_HIT_CONGRATS") {
@@ -258,9 +264,9 @@ CONTEXT:
 - TP1: $${tp1Price}
 - TP2: $${tp2Price}
 
-OUTPUT FORMAT TO FOLLOW (SHORT, PUNCHY, HIGH ENGAGEMENT):
+OUTPUT FORMAT TO FOLLOW (SHORT, PUNCHY, NO DASHES):
 
-🎯 TARGET HIT! $${symbol} TP1 & TP2 SMASHED! 🚀🔥💰
+🎯 TARGET HIT! $${symbol} TP1 and TP2 SMASHED! 🚀🔥💰
 
 Massive +${profitPct}% profit run delivered on $${symbol}! 🥂💸
 Clean rejection from resistance as predicted.
@@ -274,10 +280,9 @@ Clean rejection from resistance as predicted.
 Drop a '💰' in the comments if you caught this move with me! 👇
 What coin should we trade next?
 
-Market context: ${relatedTags}
 #${symbol} #TargetHit #CryptoProfits #BinanceSquareFamily
 
-CRITICAL: Keep it short, authentic, and mobile-friendly. NO long paragraphs. Output ONLY raw text.`;
+CRITICAL: Keep it short, authentic, and mobile-friendly. NO dashes (-- or em-dashes). Output ONLY raw text.`;
   }
 
   if (formatType === "GOVT_MACRO_NEWS") {
@@ -289,17 +294,16 @@ CONTEXT:
 
 OUTPUT FORMAT TO FOLLOW:
 
-🚨 US MACRO & FED UPDATE: Impact on $${symbol} and $BTC ⚡
+🚨 US MACRO and FED UPDATE: Impact on $${symbol} ⚡
 
 Fed liquidity expectations and US regulatory clarity are shifting capital into high-momentum altcoins like $${symbol}. 
-Watch support at $${entryLow} — holding this zone opens the door for a continuation toward $${tp1Price}.
+Watch support at $${entryLow}, holding this zone opens the door for a continuation toward $${tp1Price}.
 
 How do you see US policy impacting $${symbol} this week? Drop your view below 👇
 
-Market context: ${relatedTags}
 #${symbol} #CryptoNews #FedRateCuts #BinanceSquareFamily
 
-CRITICAL: Max 3 short paragraphs. No generic AI fluff. Output ONLY raw text.`;
+CRITICAL: Max 3 short paragraphs. NO dashes (-- or em-dashes). Output ONLY raw text.`;
   }
 
   if (formatType === "WAR_GEOPOLITICS") {
@@ -310,17 +314,16 @@ CONTEXT:
 
 OUTPUT FORMAT TO FOLLOW:
 
-⚠️ GEOPOLITICAL TENSIONS & MARKET RISK: $${symbol} Reaction 📉
+⚠️ GEOPOLITICAL TENSIONS and MARKET RISK: $${symbol} Reaction 📉
 
-Global tensions are driving sharp volatility across altcoins while capital hedges into $BTC.
+Global tensions are driving sharp volatility across altcoins while capital rotates.
 $${symbol} is holding local support around $${entryLow}. If volatility spikes, protect capital and use tight stops.
 
 Are you buying the macro dip or holding USDT? 👇
 
-Market context: ${relatedTags}
 #${symbol} #MacroEconomics #CryptoTrading #BinanceSquare
 
-CRITICAL: Super concise (under 50 words). Output ONLY raw text.`;
+CRITICAL: Super concise (under 50 words). NO dashes. Output ONLY raw text.`;
   }
 
   if (formatType === "COIN_ECOSYSTEM_NEWS") {
@@ -335,26 +338,25 @@ $${symbol} 👀🔥
 SPOT AND FUTURE WATCH
 
 $${symbol} is gaining strong buyer volume (+${changePct.toFixed(1)}%) with fresh ecosystem catalyst momentum.
-Holding key support at $${entryLow} — looking for expansion toward $${tp1Price}.
+Holding key support at $${entryLow}, looking for expansion toward $${tp1Price}.
 
 Are you in this trade or watching from sidelines? Drop your target below 👇
 
-Related: ${relatedTags}
 #${symbol} #Altcoins #CryptoTrading #BinanceSquareFamily
 
-CRITICAL: Concise, punchy, mobile-ready. Output ONLY raw text.`;
+CRITICAL: Concise, punchy, mobile-ready. NO dashes. Output ONLY raw text.`;
   }
 
-  // DEFAULT: TRADE_SIGNAL (50%)
+  // DEFAULT: TRADE_SIGNAL (30%)
   if (isShort || changePct >= 45.0) {
-    return `You are a real day trader posting a fast SHORT signal on Binance Square (similar to: "📉 Shorting $AKE at 0.0216 After huge pump Bearish wall 🧱").
+    return `You are a real day trader posting a fast SHORT signal on Binance Square.
 
 TRADE DATA:
 - Coin: $${symbol}
 - Current Price: $${entryPoint}
 - 24h Pump: +${changePct.toFixed(1)}% (Overextended peak!)
 - Resistance: $${formatPrice(high24h)}
-- Entry: ${entryLow} – ${entryHigh}
+- Entry: ${entryLow} to ${entryHigh}
 - Stop Loss: ${slPrice}
 - TP1: ${tp1Price}
 - TP2: ${tp2Price}
@@ -362,13 +364,13 @@ TRADE DATA:
 
 OUTPUT FORMAT TO FOLLOW:
 
-📉 Shorting $${symbol} at ${entryPoint} – Overextended Pump Rejection 🧱
+📉 Shorting $${symbol} at ${entryPoint} | Overextended Pump Rejection 🧱
 
 $${symbol} pumped +${changePct.toFixed(1)}% and just hit a heavy resistance wall at ${formatPrice(high24h)}. 
 Sellers are stepping in with massive profit taking.
 
 🐻 SHORT SIGNAL
-Entry: ${entryLow} – ${entryHigh}
+Entry: ${entryLow} to ${entryHigh}
 Stop Loss: ${slPrice}
 TP1: ${tp1Price}
 TP2: ${tp2Price}
@@ -377,11 +379,10 @@ TP3: ${tp3Price}
 High risk scalp after a parabolic move. Size small + strict SL.
 Who’s shorting $${symbol} with me? 👇
 
-Market context: ${relatedTags}
 Always DYOR.
 #${symbol} #ShortSetup #CryptoTrading #BinanceSquareFamily
 
-CRITICAL: Keep it crisp, urgent, and human. Output ONLY raw text.`;
+CRITICAL: Keep it crisp, urgent, and human. NO dashes (-- or em-dashes). Output ONLY raw text.`;
   }
 
   // LONG SIGNAL
@@ -392,7 +393,7 @@ TRADE DATA:
 - Current Price: $${entryPoint}
 - 24h Gain: +${changePct.toFixed(1)}% (Momentum continuation)
 - Support: $${formatPrice(low24h)}
-- Entry: ${entryLow} – ${entryHigh}
+- Entry: ${entryLow} to ${entryHigh}
 - Stop Loss: ${slPrice}
 - TP1: ${tp1Price}
 - TP2: ${tp2Price}
@@ -400,13 +401,13 @@ TRADE DATA:
 
 OUTPUT FORMAT TO FOLLOW:
 
-🚨 $${symbol} LONG SETUP – Momentum Breakout Confirmed 🔥
+🚨 $${symbol} LONG SETUP | Momentum Breakout Confirmed 🔥
 
 $${symbol} is holding strong above local support (+${changePct.toFixed(1)}%).
 Buyers are absorbing all dips with rising spot volume.
 
 🐂 LONG SIGNAL
-Entry: ${entryLow} – ${entryHigh}
+Entry: ${entryLow} to ${entryHigh}
 Stop Loss: ${slPrice}
 TP1: ${tp1Price}
 TP2: ${tp2Price}
@@ -415,11 +416,10 @@ TP3: ${tp3Price}
 Structure remains clean as long as it holds above ${slPrice}.
 Are you riding $${symbol} to the targets? Drop your target below 👇
 
-Market context: ${relatedTags}
 Always DYOR.
 #${symbol} #LongSetup #CryptoTrading #BinanceSquareFamily
 
-CRITICAL: Keep it crisp, urgent, and human. Output ONLY raw text.`;
+CRITICAL: Keep it crisp, urgent, and human. NO dashes (-- or em-dashes). Output ONLY raw text.`;
 }
 
 /**
@@ -654,6 +654,14 @@ export async function publishToSquare(content, apiKey, options = {}) {
     }
     return tag; // drop # to avoid hashtag limit
   });
+
+  // 3. Remove all em-dashes and double-dashes to keep formatting natural and human
+  sanitized = sanitized
+    .replace(/--+/g, " ")
+    .replace(/\s*[—–]\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/ \n /g, "\n")
+    .trim();
 
   let richContent = sanitized;
   if (images && Array.isArray(images) && images.length > 0) {

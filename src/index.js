@@ -57,54 +57,55 @@ async function setKV(kv, key, value) {
 }
 
 /**
- * Main 5-minute Round Robin Pipeline
+ * Main 15-minute Top 3 Altcoin Gainers Rotation Pipeline
  */
 async function runRoundRobinPipeline(env) {
   validateWorkerEnv(env);
 
-  let cachedQueue = await getKV(env.POST_CACHE, KV_QUEUE_KEY);
-  let currentIndex = (await getKV(env.POST_CACHE, KV_INDEX_KEY)) ?? 0;
+  // 1. Always fetch real-time Top Altcoin Gainers from Binance
+  console.log("[pipeline] Scanning live Top 3 Altcoin Gainers from Binance API...");
+  const movers = await getMarketMovers(10, 1_000_000);
+  const top3 = (movers.top3 && movers.top3.length > 0) ? movers.top3 : movers.queue.slice(0, 3);
 
-  // If queue is empty or finished, fetch fresh Top Altcoin Gainers
-  if (!cachedQueue || !Array.isArray(cachedQueue) || currentIndex >= cachedQueue.length) {
-    console.log("[pipeline] Refreshing real-time Top Altcoin Gainers rotation queue...");
-    const movers = await getMarketMovers(10, 1_000_000);
-    cachedQueue = movers.queue;
-    currentIndex = 0;
-
-    await setKV(env.POST_CACHE, KV_QUEUE_KEY, cachedQueue);
-    await setKV(env.POST_CACHE, KV_INDEX_KEY, 0);
+  if (!top3 || top3.length === 0) {
+    throw new Error("No valid altcoin gainers found from Binance API.");
   }
 
-  const currentCoin = cachedQueue[currentIndex];
-  const itemNum = currentIndex + 1;
-  const totalItems = cachedQueue.length;
+  // 2. Rotate strictly across Top 1 -> Top 2 -> Top 3 (index 0, 1, 2)
+  let currentIndex = Number((await getKV(env.POST_CACHE, KV_INDEX_KEY)) ?? 0);
+  if (isNaN(currentIndex) || currentIndex < 0) currentIndex = 0;
 
-  console.log(`[pipeline] Processing [${itemNum}/${totalItems}]: $${currentCoin.baseAsset} (${currentCoin.category.toUpperCase()})`);
+  const targetIndex = currentIndex % top3.length;
+  const currentCoin = top3[targetIndex];
 
-  // Generate technical analysis post
-  const postContent = await generateTraderPost(currentCoin, cachedQueue, {
+  console.log(`[pipeline] Selected Top #${targetIndex + 1} Gainer: $${currentCoin.baseAsset} (+${currentCoin.priceChangePercent.toFixed(1)}%) at $${formatPrice(currentCoin.lastPrice)}`);
+
+  // 3. Generate trader post for this live top gainer
+  const postContent = await generateTraderPost(currentCoin, movers.queue, {
     provider: env.LLM_PROVIDER,
     geminiKey: env.GEMINI_API_KEY,
     openrouterKey: env.OPENROUTER_API_KEY,
     model: env.LLM_MODEL,
   });
 
-  // Publish to Binance Square
+  // 4. Publish to Binance Square
   const publishRes = await publishToSquare(postContent, env.BINANCE_SQUARE_API_KEY);
 
-  // Advance index for next 5-minute cycle
-  await setKV(env.POST_CACHE, KV_INDEX_KEY, currentIndex + 1);
+  // 5. Advance rotation index to next top gainer (0 -> 1 -> 2 -> 0)
+  const nextIndex = (targetIndex + 1) % top3.length;
+  await setKV(env.POST_CACHE, KV_INDEX_KEY, nextIndex);
+  await setKV(env.POST_CACHE, KV_QUEUE_KEY, [currentCoin.baseAsset]);
+
+  console.log(`[pipeline] ✅ Published $${currentCoin.baseAsset}. Next run will target Top #${nextIndex + 1} Gainer.`);
 
   return {
     success: true,
-    itemNumber: `${itemNum}/${totalItems}`,
-    category: currentCoin.category,
+    topRank: targetIndex + 1,
     symbol: currentCoin.symbol,
-    direction: currentCoin.defaultDirection,
+    baseAsset: currentCoin.baseAsset,
     price: formatPrice(currentCoin.lastPrice),
     change: currentCoin.priceChangePercent,
-    post: postContent,
+    post: postContent.text || postContent,
     binanceResult: publishRes,
   };
 }

@@ -142,46 +142,34 @@ export async function executeRoundRobinCycle() {
   isRunning = true;
   const startTime = new Date().toISOString();
 
-  try {
-    let cachedQueue = getState("rotation_queue");
-    let currentIndex = getState("rotation_index") ?? 0;
+    // 1. Always fetch real-time Top Altcoin Gainers from Binance
+    console.log(`\n════════════════════════════════════════════════════════════`);
+    console.log(`🔄 [${startTime}] Scanning Live Top 3 Binance Altcoin Gainers`);
+    console.log(`════════════════════════════════════════════════════════════`);
 
-    // If queue is empty or finished all 10 coins, fetch fresh list
-    if (!cachedQueue || !Array.isArray(cachedQueue) || currentIndex >= cachedQueue.length) {
-      console.log(`\n════════════════════════════════════════════════════════════`);
-      console.log(`🔄 [${startTime}] Refreshing Top 5 Gainers & Top 5 Losers Queue`);
-      console.log(`════════════════════════════════════════════════════════════`);
+    const movers = await getMarketMovers(10, 1_000_000);
+    const top3 = (movers.top3 && movers.top3.length > 0) ? movers.top3 : movers.queue.slice(0, 3);
 
-      const movers = await getMarketMovers(5, 500_000);
-      cachedQueue = movers.queue;
-      currentIndex = 0;
-
-      setState("rotation_queue", cachedQueue);
-      setState("rotation_index", 0);
-
-      console.log(`\n📊 New Rotation Queue Created (10 Coins Total):`);
-      console.log(`  🟢 TOP 5 GAINERS:`);
-      movers.gainers.forEach((g, i) => {
-        console.log(`     ${i + 1}. $${g.baseAsset.padEnd(8)} (+${g.priceChangePercent.toFixed(2)}%) at $${formatPrice(g.lastPrice)}`);
-      });
-      console.log(`  🔴 TOP 5 LOSERS:`);
-      movers.losers.forEach((l, i) => {
-        console.log(`     ${i + 1}. $${l.baseAsset.padEnd(8)} (${l.priceChangePercent.toFixed(2)}%) at $${formatPrice(l.lastPrice)}`);
-      });
-      console.log("");
+    if (!top3 || top3.length === 0) {
+      throw new Error("No valid altcoin gainers found from Binance API.");
     }
 
-    const currentCoin = cachedQueue[currentIndex];
-    const itemNum = currentIndex + 1;
-    const totalItems = cachedQueue.length;
-    const catUpper = currentCoin.category.toUpperCase();
+    console.log(`\n📊 Live Top Altcoin Gainers:`);
+    top3.forEach((g, i) => {
+      console.log(`   ${i + 1}. $${g.baseAsset.padEnd(8)} (+${g.priceChangePercent.toFixed(2)}%) at $${formatPrice(g.lastPrice)}`);
+    });
 
-    console.log(`\n🎯 [${startTime}] Processing Queue Item [${itemNum}/${totalItems}]:`);
-    console.log(`   Coin: $${currentCoin.baseAsset} | Type: ${catUpper} #${currentCoin.rank} | 24h Change: ${currentCoin.priceChangePercent >= 0 ? "+" : ""}${currentCoin.priceChangePercent.toFixed(2)}% | Price: $${formatPrice(currentCoin.lastPrice)}`);
+    let currentIndex = Number(getState("rotation_index") ?? 0);
+    if (isNaN(currentIndex) || currentIndex < 0) currentIndex = 0;
+
+    const targetIndex = currentIndex % top3.length;
+    const currentCoin = top3[targetIndex];
+
+    console.log(`\n🎯 [${startTime}] Selected Top #${targetIndex + 1} Gainer: $${currentCoin.baseAsset} (+${currentCoin.priceChangePercent.toFixed(1)}%) at $${formatPrice(currentCoin.lastPrice)}`);
 
     // Generate trade setup via LLM
-    console.log(`[ai] Generating ${currentCoin.defaultDirection} setup via ${LLM_PROVIDER.toUpperCase()}...`);
-    const postContent = await generateTraderPost(currentCoin, cachedQueue, {
+    console.log(`[ai] Generating post setup via ${LLM_PROVIDER.toUpperCase()}...`);
+    const postContent = await generateTraderPost(currentCoin, movers.queue, {
       provider: LLM_PROVIDER,
       geminiKey: GEMINI_API_KEY,
       openrouterKey: OPENROUTER_API_KEY,
@@ -189,23 +177,23 @@ export async function executeRoundRobinCycle() {
     });
 
     console.log(`\n📝 ─── GENERATED POST CONTENT ───\n`);
-    console.log(postContent);
+    console.log(postContent.text || postContent);
     console.log(`\n─────────────────────────────────\n`);
 
     // Publish to Binance Square
     if (BINANCE_SQUARE_API_KEY && BINANCE_SQUARE_API_KEY !== "your_binance_square_api_key_here") {
       await publishToSquare(postContent, BINANCE_SQUARE_API_KEY);
-      recordPost(currentCoin.symbol, currentCoin.category, currentCoin.lastPrice, currentCoin.priceChangePercent, postContent);
+      recordPost(currentCoin.symbol, currentCoin.category, currentCoin.lastPrice, currentCoin.priceChangePercent, postContent.text || postContent);
       console.log(`[cycle] ✅ Post published and recorded in database.`);
     } else {
       console.log(`[publish] ⚠️ BINANCE_SQUARE_API_KEY is not configured. Post generated successfully & logged.`);
-      recordPost(currentCoin.symbol, currentCoin.category, currentCoin.lastPrice, currentCoin.priceChangePercent, postContent);
+      recordPost(currentCoin.symbol, currentCoin.category, currentCoin.lastPrice, currentCoin.priceChangePercent, postContent.text || postContent);
     }
 
-    // Advance queue index for the next 10-minute cycle
-    const nextIndex = currentIndex + 1;
+    // Advance rotation index for next 15-minute cycle (0 -> 1 -> 2 -> 0)
+    const nextIndex = (targetIndex + 1) % top3.length;
     setState("rotation_index", nextIndex);
-    console.log(`[queue] Next coin in 10 minutes will be index #${nextIndex < totalItems ? nextIndex + 1 : 1} of ${totalItems}`);
+    console.log(`[queue] Next run in 15 minutes will target Top #${nextIndex + 1} Gainer: $${top3[nextIndex].baseAsset}`);
 
   } catch (err) {
     console.error(`[cycle] ❌ Error in cycle: ${err.message}`);
