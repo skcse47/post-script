@@ -65,10 +65,10 @@ async function runRoundRobinPipeline(env) {
   let cachedQueue = await getKV(env.POST_CACHE, KV_QUEUE_KEY);
   let currentIndex = (await getKV(env.POST_CACHE, KV_INDEX_KEY)) ?? 0;
 
-  // If queue is empty or finished, fetch fresh Top 5 Gainers + Top 5 Losers
+  // If queue is empty or finished, fetch fresh Top Altcoin Gainers
   if (!cachedQueue || !Array.isArray(cachedQueue) || currentIndex >= cachedQueue.length) {
-    console.log("[pipeline] Refreshing 10-coin market rotation queue...");
-    const movers = await getMarketMovers(5, 500_000);
+    console.log("[pipeline] Refreshing real-time Top Altcoin Gainers rotation queue...");
+    const movers = await getMarketMovers(10, 1_000_000);
     cachedQueue = movers.queue;
     currentIndex = 0;
 
