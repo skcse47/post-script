@@ -195,23 +195,60 @@ export async function getMarketMovers(count = 10, minVolumeUSDT = 1_000_000) {
 }
 
 /**
- * Backward compatible getTopGainers helper
+ * Fetch Top 3 Trending Hashtags / Hot Topics from Binance Square PGC API
+ * @param {number} limit Number of trending topics to return (default 3)
+ * @returns {Promise<Array<object>>}
  */
-export async function getTopGainers(limit = 10, minVolumeUSDT = 500000) {
-  const movers = await getMarketMovers(limit, minVolumeUSDT);
-  return movers.queue;
+export async function getHotTrendingHashtags(limit = 3) {
+  const HOT_LIST_URL = "https://www.binance.com/bapi/composite/v2/public/pgc/hashtag/hot-list";
+  try {
+    const res = await fetch(HOT_LIST_URL, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "lang": "en"
+      }
+    });
+
+    if (!res.ok) {
+      console.warn(`[hot-list] API returned ${res.status}: ${res.statusText}`);
+      return [];
+    }
+
+    const json = await res.json();
+    const dataList = json?.data?.data || [];
+    const topContent = json?.data?.topContent;
+
+    // Extract trending coins from hot list (e.g. ZEC, DASH, BTC)
+    const rawCoinPairs = (topContent?.coinPairList || []).map(c => c.replace(/[\$\s]/g, "").toUpperCase());
+    const tradingPairsCodes = (topContent?.tradingPairs || []).map(p => p.code?.toUpperCase()).filter(Boolean);
+    const extractedCoins = [...new Set([...rawCoinPairs, ...tradingPairsCodes])].filter(c => !BANNED_BASE_ASSETS.has(c));
+
+    return dataList.slice(0, limit).map((item, idx) => ({
+      rank: idx + 1,
+      hashtag: item.hashtag, // e.g. "#ZECHitsANewAllTimeHigh"
+      viewCount: item.viewCount,
+      contentCount: item.contentCount,
+      description: item.description,
+      trendingCoins: extractedCoins,
+      topSnippet: (idx === 0 && topContent?.content) ? topContent.content.substring(0, 300) : null,
+      topImage: (idx === 0 && topContent?.images?.[0]) ? topContent.images[0] : null
+    }));
+  } catch (err) {
+    console.error(`[hot-list] Error fetching trending hashtags: ${err.message}`);
+    return [];
+  }
 }
 
 /**
  * Build human-written, urgent, concise, high-converting posts without dashes.
  * Formats:
- * 1. TRADE_SIGNAL (30%): Fast momentum breakout signal for active gainers
- * 2. FOMO_PUMP_CALL (30%): Ultra-short (<150 letters) technical hype on Top 3 pumping coins
- * 3. TARGET_HIT_CONGRATS (15%): Celebration post with winning emojis for hit TP targets
- * 4. GOVT_MACRO_NEWS (15%): US Government, SEC & Fed rate impact
- * 5. COIN_ECOSYSTEM_NEWS (10%): Coin ecosystem developments & catalysts
+ * 1. TRADE_SIGNAL (35%): Fast momentum breakout signal for active gainers
+ * 2. FOMO_PUMP_CALL (30%): Ultra-short (<150 letters) technical hype featuring gainers + trending coins
+ * 3. TRENDING_TOPIC (20%): Viral insights on Top 3 trending hashtags from Binance Square
+ * 4. TARGET_HIT_CONGRATS (15%): Celebration post with winning emojis for hit TP targets
  */
-function buildMultiFormatPrompt(coin, formatType = "TRADE_SIGNAL", allMovers = []) {
+function buildMultiFormatPrompt(coin, formatType = "TRADE_SIGNAL", allMovers = [], trendingTopic = null) {
   const currentPrice = coin.lastPrice;
   const changePct = coin.priceChangePercent;
   const symbol = coin.baseAsset;
@@ -227,30 +264,74 @@ function buildMultiFormatPrompt(coin, formatType = "TRADE_SIGNAL", allMovers = [
   const tp2Price = isShort ? formatPrice(currentPrice * 0.910) : formatPrice(currentPrice * 1.095);
   const tp3Price = isShort ? formatPrice(currentPrice * 0.860) : formatPrice(currentPrice * 1.155);
 
-  const otherTopGainer = (allMovers || [])
-    .filter((m) => m.baseAsset && m.baseAsset !== symbol && m.priceChangePercent > 5)
-    .slice(0, 1)
-    .map((m) => `$${m.baseAsset}`)[0] || "";
+  // Pick trending coin from hot list or other top gainer
+  let trendingCompanion = "";
+  if (trendingTopic?.trendingCoins && trendingTopic.trendingCoins.length > 0) {
+    const matched = trendingTopic.trendingCoins.find(c => c !== symbol);
+    if (matched) trendingCompanion = `$${matched}`;
+  }
+  if (!trendingCompanion) {
+    trendingCompanion = (allMovers || [])
+      .filter((m) => m.baseAsset && m.baseAsset !== symbol && m.priceChangePercent > 5)
+      .slice(0, 1)
+      .map((m) => `$${m.baseAsset}`)[0] || "";
+  }
 
-  if (formatType === "FOMO_PUMP_CALL") {
-    return `You are a real crypto day trader on Binance Square writing an ultra-short technical micro-post (STRICTLY UNDER 135 CHARACTERS) for the top gainer $${symbol}.
+  if (formatType === "TRENDING_TOPIC" && trendingTopic) {
+    const hashtag = trendingTopic.hashtag || "#Crypto";
+    const cleanTopic = hashtag.replace(/^#/, "").replace(/([a-z])([A-Z0-9])/g, "$1 $2");
 
-CONTEXT:
-- Featured Top Gainer: $${symbol} (+${changePct.toFixed(1)}%, price: $${entryPoint})
-${otherTopGainer ? `- Also pumping in Top 3: ${otherTopGainer}` : ''}
+    return `You are a real crypto trader on Binance Square writing a simple, exciting market post about the trending topic: ${hashtag}.
+
+TOPIC CONTEXT:
+- Trending Hashtag: ${hashtag}
+- Topic: ${cleanTopic}
+${trendingTopic.viewCount ? `- Views on Binance Square: ${trendingTopic.viewCount.toLocaleString()}` : ''}
+
+OUTPUT FORMAT TO FOLLOW (SIMPLE ENGLISH, CLEAN PARAGRAPHS, NO DASHES):
+
+🔥 TRENDING NOW: ${cleanTopic} | Market Update ⚡
+
+${hashtag} is trending number 1 across Binance Square right now!
+Explain in simple, everyday English why people are talking about this and what it means for crypto buyers and sellers today.
+
+Key Points for Traders:
+• Market Mood: Buyers are stepping in with strong volume
+• Next Move: Key support levels to watch closely
+
+What do you think about ${cleanTopic}? Share your thoughts below 👇
+
+${hashtag} #CryptoNews #BinanceSquareFamily
 
 CRITICAL RULES:
-1. Do NOT give defined price targets (NO TP1, NO TP2, NO list).
-2. Write a single punchy technical observation that creates massive buying urgency (e.g., whale absorption, breaking 4H resistance, order book cleared to upside, short squeeze).
-3. DO NOT USE DASHES (-- or em-dashes). Keep it raw and human.
-4. MAXIMUM LENGTH: UNDER 135 CHARACTERS TOTAL.
+1. Write in simple, clear, natural English. Avoid complicated words.
+2. Include the exact trending hashtag: ${hashtag}
+3. Keep clear double line breaks between sections.
+4. DO NOT use dashes (-- or em-dashes).
+5. Output ONLY raw text.`;
+  }
+
+  if (formatType === "FOMO_PUMP_CALL") {
+    return `You are an active crypto day trader on Binance Square writing an ultra-short FOMO micro-post (UNDER 130 CHARACTERS) for $${symbol}${trendingCompanion ? ` and trending coin ${trendingCompanion}` : ''}.
+
+CONTEXT:
+- Featured Gainer: $${symbol} (+${changePct.toFixed(1)}%, price: $${entryPoint})
+${trendingCompanion ? `- Trending Partner: ${trendingCompanion}` : ''}
+
+CRITICAL RULES:
+1. Write in simple, punchy, exciting English.
+2. Do NOT give price lists or target numbers (NO TP1, NO TP2).
+3. Mention $${symbol}${trendingCompanion ? ` and optionally ${trendingCompanion}` : ''}.
+4. Mention a fast technical reason (whale buying, 4H breakout, volume spike, short squeeze).
+5. STRICT LENGTH: UNDER 130 CHARACTERS TOTAL (1-2 short lines).
+6. DO NOT use dashes (-- or em-dashes).
 
 EXAMPLES:
-🔥 $${symbol} breaking massive 4H resistance! Whales absorbing all sell orders. Next leg loading! 🚀 #Altcoins #Crypto
-👀 $${symbol} volume just spiked 400%! Order book cleared to upside. Don't fade this pump 🐂 #${symbol}
-⚡ $${symbol} printing god candles on 1H! Huge buy wall at $${entryLow}. Shorts getting squeezed hard! 🚀 #${symbol}
+🔥 $${symbol} breaking massive 4H resistance! Whales buying every dip. Next pump is loading fast 🚀 #${symbol}
+👀 $${symbol} volume just spiked 400%! Order books cleared to the upside. Don't fade this move 🐂 #${symbol}
+⚡ $${symbol} ${trendingCompanion ? `& ${trendingCompanion} ` : ''}printing big green candles! Shorts getting squeezed hard 🚀 #${symbol}
 
-Output ONLY raw text (under 135 characters, NO dashes):`;
+Output ONLY raw short text (under 130 characters, simple English, NO dashes):`;
   }
 
   if (formatType === "TARGET_HIT_CONGRATS") {
@@ -285,69 +366,7 @@ What coin should we trade next?
 CRITICAL: Keep it short, authentic, and mobile-friendly. NO dashes (-- or em-dashes). Output ONLY raw text.`;
   }
 
-  if (formatType === "GOVT_MACRO_NEWS") {
-    return `You are a real crypto analyst on Binance Square posting a brief, urgent 2-sentence macro/regulatory update.
-
-CONTEXT:
-- Coin: $${symbol} ($${entryPoint})
-- 24h Change: ${changePct > 0 ? "+" : ""}${changePct.toFixed(1)}%
-
-OUTPUT FORMAT TO FOLLOW:
-
-🚨 US MACRO and FED UPDATE: Impact on $${symbol} ⚡
-
-Fed liquidity expectations and US regulatory clarity are shifting capital into high-momentum altcoins like $${symbol}. 
-Watch support at $${entryLow}, holding this zone opens the door for a continuation toward $${tp1Price}.
-
-How do you see US policy impacting $${symbol} this week? Drop your view below 👇
-
-#${symbol} #CryptoNews #FedRateCuts #BinanceSquareFamily
-
-CRITICAL: Max 3 short paragraphs. NO dashes (-- or em-dashes). Output ONLY raw text.`;
-  }
-
-  if (formatType === "WAR_GEOPOLITICS") {
-    return `You are a real crypto trader on Binance Square sharing a quick macro risk update.
-
-CONTEXT:
-- Coin: $${symbol} ($${entryPoint})
-
-OUTPUT FORMAT TO FOLLOW:
-
-⚠️ GEOPOLITICAL TENSIONS and MARKET RISK: $${symbol} Reaction 📉
-
-Global tensions are driving sharp volatility across altcoins while capital rotates.
-$${symbol} is holding local support around $${entryLow}. If volatility spikes, protect capital and use tight stops.
-
-Are you buying the macro dip or holding USDT? 👇
-
-#${symbol} #MacroEconomics #CryptoTrading #BinanceSquare
-
-CRITICAL: Super concise (under 50 words). NO dashes. Output ONLY raw text.`;
-  }
-
-  if (formatType === "COIN_ECOSYSTEM_NEWS") {
-    return `You are an active crypto trader posting a fast, clickable watch setup on $${symbol} on Binance Square.
-
-CONTEXT:
-- Coin: $${symbol} ($${entryPoint}, 24h: ${changePct > 0 ? "+" : ""}${changePct.toFixed(1)}%)
-
-OUTPUT FORMAT TO FOLLOW:
-
-$${symbol} 👀🔥
-SPOT AND FUTURE WATCH
-
-$${symbol} is gaining strong buyer volume (+${changePct.toFixed(1)}%) with fresh ecosystem catalyst momentum.
-Holding key support at $${entryLow}, looking for expansion toward $${tp1Price}.
-
-Are you in this trade or watching from sidelines? Drop your target below 👇
-
-#${symbol} #Altcoins #CryptoTrading #BinanceSquareFamily
-
-CRITICAL: Concise, punchy, mobile-ready. NO dashes. Output ONLY raw text.`;
-  }
-
-  // DEFAULT: TRADE_SIGNAL (30%)
+  // DEFAULT: TRADE_SIGNAL (35%)
   if (isShort || changePct >= 45.0) {
     return `You are a real day trader posting a fast SHORT signal on Binance Square.
 
@@ -532,27 +551,18 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
 /**
  * Resolve high-quality relevant image URL for news, coin ecosystem, and target hit posts.
  */
-export function resolvePostImageUrl(coin, formatType = "") {
+export function resolvePostImageUrl(coin, formatType = "", trendingTopic = null) {
+  if (formatType === "TRENDING_TOPIC") {
+    if (trendingTopic?.topImage) return trendingTopic.topImage;
+    const trendingImages = [
+      "https://images.unsplash.com/photo-1642543492481-44e81e3914a7?w=800&auto=format&fit=crop&q=80", // Crypto Trend / Liquidity
+      "https://images.unsplash.com/photo-1621416894569-0f39ed31d247?w=800&auto=format&fit=crop&q=80", // Bitcoin Market Momentum
+      "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop&q=80"  // Trading Analytics
+    ];
+    return trendingImages[Math.floor(Math.random() * trendingImages.length)];
+  }
+
   const sym = (coin?.baseAsset || "").toLowerCase();
-
-  if (formatType === "GOVT_MACRO_NEWS") {
-    const macroImages = [
-      "https://images.unsplash.com/photo-1621416894569-0f39ed31d247?w=800&auto=format&fit=crop&q=80", // Bitcoin / Macro
-      "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop&q=80", // Trading / Federal Reserve
-      "https://images.unsplash.com/photo-1642543492481-44e81e3914a7?w=800&auto=format&fit=crop&q=80"  // Market Liquidity
-    ];
-    return macroImages[Math.floor(Math.random() * macroImages.length)];
-  }
-
-  if (formatType === "WAR_GEOPOLITICS") {
-    const warImages = [
-      "https://images.unsplash.com/photo-1639762681485-074b7f938ba0?w=800&auto=format&fit=crop&q=80", // Global Network / Crypto Shock
-      "https://images.unsplash.com/photo-1622979135225-d2ba269bc1df?w=800&auto=format&fit=crop&q=80"  // Market Volatility
-    ];
-    return warImages[Math.floor(Math.random() * warImages.length)];
-  }
-
-  // Coin Ecosystem News & Target Hit: High-res crypto icons & graphics
   if (sym) {
     return `https://assets.coincap.io/assets/icons/${sym}@2x.png`;
   }
@@ -562,33 +572,42 @@ export function resolvePostImageUrl(coin, formatType = "") {
 
 /**
  * Universal Post Generator supporting Gemini or OpenRouter:
- * 50% Top Gainer Signals (>45% Short, <45% Long), 15% Congrats Target Hit, 35% News/Macro/War
+ * 35% Top Gainer Signals (>45% Short, <45% Long), 30% FOMO Tease, 20% Trending Topics (Hot List), 15% Target Hit Congrats
  */
 export async function generateTraderPost(coin, allMovers, options = {}) {
-  // Balanced High-Reach Distribution:
-  // - 30% Full Trade Signals (Entry/SL/TP)
-  // - 30% Ultra-Short FOMO Tease (<150 letters, technical hype on pumping gainers)
-  // - 15% Target Hit Congrats
-  // - 15% US Govt / SEC / Macro
-  // - 10% Coin Ecosystem Watch
   const weightedFormats = [
-    "TRADE_SIGNAL",          // 30% Defined Signals
+    "TRADE_SIGNAL",          // 35% Defined Signals (Entry/SL/TP)
     "TRADE_SIGNAL",
     "TRADE_SIGNAL",
-    "FOMO_PUMP_CALL",        // 30% Ultra-Short Technical Tease (<150 chars)
+    "FOMO_PUMP_CALL",        // 30% Ultra-Short Technical Tease (<135 chars)
     "FOMO_PUMP_CALL",
     "FOMO_PUMP_CALL",
-    "TARGET_HIT_CONGRATS",   // 15% Target Smashed
-    "TARGET_HIT_CONGRATS",
-    "GOVT_MACRO_NEWS",       // 15% Macro/Fed/Gov
-    "COIN_ECOSYSTEM_NEWS"    // 10% Ecosystem Watch
+    "TRENDING_TOPIC",        // 20% Top 3 Trending Hashtags from Binance Square
+    "TRENDING_TOPIC",
+    "TARGET_HIT_CONGRATS",   // 15% Target Smashed Congrats
+    "TARGET_HIT_CONGRATS"
   ];
 
   const formatType = options.format || weightedFormats[Math.floor(Math.random() * weightedFormats.length)];
-  console.log(`[ai] Generating post content with format: [${formatType}] for $${coin.baseAsset} (24h: ${coin.priceChangePercent > 0 ? "+" : ""}${coin.priceChangePercent.toFixed(1)}%)`);
+  let trendingTopic = options.trendingTopic || null;
 
-  const prompt = buildMultiFormatPrompt(coin, formatType, allMovers);
-  const imageUrl = resolvePostImageUrl(coin, formatType);
+  if ((formatType === "TRENDING_TOPIC" || formatType === "FOMO_PUMP_CALL") && !trendingTopic) {
+    try {
+      const hotList = await getHotTrendingHashtags(3);
+      if (hotList && hotList.length > 0) {
+        trendingTopic = hotList[Math.floor(Math.random() * hotList.length)];
+        console.log(`[hot-list] 🔥 Trending Context Loaded: ${trendingTopic.hashtag} (Coins: ${trendingTopic.trendingCoins?.join(", ") || "None"})`);
+      }
+    } catch (err) {
+      console.warn(`[hot-list] Failed to fetch trending topic: ${err.message}`);
+    }
+  }
+
+  const targetName = formatType === "TRENDING_TOPIC" && trendingTopic ? trendingTopic.hashtag : `$${coin?.baseAsset || "MARKET"}`;
+  console.log(`[ai] Generating post content with format: [${formatType}] for ${targetName}`);
+
+  const prompt = buildMultiFormatPrompt(coin, formatType, allMovers, trendingTopic);
+  const imageUrl = resolvePostImageUrl(coin, formatType, trendingTopic);
   
   const rawProvider = String(options.provider || "").trim().toLowerCase();
   const isGemini = rawProvider === "1" || rawProvider === "gemini";
