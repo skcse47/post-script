@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 
 import {
   getMarketMovers,
+  getHotTrendingHashtags,
   generateTraderPost,
   publishToSquare,
   formatPrice,
@@ -83,16 +84,29 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL,
     category TEXT DEFAULT 'gainer',
+    base_asset TEXT DEFAULT '',
+    format_type TEXT DEFAULT '',
     price REAL NOT NULL,
     change_pct REAL NOT NULL,
     post_content TEXT NOT NULL,
+    is_trending INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS coin_performance (
+    base_asset TEXT PRIMARY KEY,
+    total_posts INTEGER DEFAULT 0,
+    trending_hits INTEGER DEFAULT 0,
+    priority_score REAL DEFAULT 0,
+    last_posted_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
 
-try {
-  db.exec("ALTER TABLE post_history ADD COLUMN category TEXT DEFAULT 'gainer'");
-} catch (e) {}
+// Safe column additions for existing databases
+try { db.exec("ALTER TABLE post_history ADD COLUMN category TEXT DEFAULT 'gainer'"); } catch (e) {}
+try { db.exec("ALTER TABLE post_history ADD COLUMN base_asset TEXT DEFAULT ''"); } catch (e) {}
+try { db.exec("ALTER TABLE post_history ADD COLUMN format_type TEXT DEFAULT ''"); } catch (e) {}
+try { db.exec("ALTER TABLE post_history ADD COLUMN is_trending INTEGER DEFAULT 0"); } catch (e) {}
 
 /**
  * Get state value from SQLite
@@ -121,12 +135,47 @@ function getLastPostTime() {
 }
 
 /**
- * Record a published post in SQLite
+ * Record a published post in SQLite with full tracking
  */
-function recordPost(symbol, category, price, changePct, content) {
+function recordPost(symbol, category, price, changePct, content, baseAsset = '', formatType = '', isTrending = false) {
   db.prepare(
-    "INSERT INTO post_history (symbol, category, price, change_pct, post_content) VALUES (?, ?, ?, ?, ?)"
-  ).run(symbol, category, price, changePct, content);
+    "INSERT INTO post_history (symbol, category, base_asset, format_type, price, change_pct, post_content, is_trending) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(symbol, category, baseAsset, formatType, price, changePct, content, isTrending ? 1 : 0);
+
+  // Update coin performance tracking
+  if (baseAsset) {
+    db.prepare(`
+      INSERT INTO coin_performance (base_asset, total_posts, trending_hits, priority_score, last_posted_at)
+      VALUES (?, 1, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(base_asset) DO UPDATE SET
+        total_posts = total_posts + 1,
+        trending_hits = trending_hits + ?,
+        priority_score = priority_score + ?,
+        last_posted_at = CURRENT_TIMESTAMP
+    `).run(baseAsset, isTrending ? 1 : 0, isTrending ? 2.0 : 0.5, isTrending ? 1 : 0, isTrending ? 2.0 : 0.5);
+  }
+}
+
+/**
+ * Get coins with highest priority scores (trending overlap = high engagement proxy)
+ * Returns coins sorted by priority_score DESC, only those posted in the last 48 hours
+ */
+function getHighPriorityCoins(limit = 5) {
+  return db.prepare(`
+    SELECT base_asset, total_posts, trending_hits, priority_score, last_posted_at
+    FROM coin_performance
+    WHERE last_posted_at > datetime('now', '-48 hours')
+      AND trending_hits > 0
+    ORDER BY priority_score DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+/**
+ * Check if a coin is currently trending (appeared in hot-list recently)
+ */
+function isCoinTrending(baseAsset, trendingCoins = []) {
+  return trendingCoins.some(c => c.toUpperCase() === baseAsset.toUpperCase());
 }
 
 // ─── Main Execution Pipeline ─────────────────────────────────────────────────
@@ -155,18 +204,55 @@ export async function executeRoundRobinCycle() {
       throw new Error("No valid altcoin gainers found from Binance API.");
     }
 
+    // 2. Fetch trending topics to detect engagement overlap
+    let trendingCoins = [];
+    let trendingTopic = null;
+    try {
+      const hotList = await getHotTrendingHashtags(3);
+      if (hotList && hotList.length > 0) {
+        trendingCoins = hotList.flatMap(h => h.trendingCoins || []);
+        trendingTopic = hotList[Math.floor(Math.random() * hotList.length)];
+        console.log(`[hot-list] 🔥 Trending coins detected: ${trendingCoins.join(", ") || "None"}`);
+      }
+    } catch (err) {
+      console.warn(`[hot-list] Could not fetch trending data: ${err.message}`);
+    }
+
+    // 3. Check priority coins from past performance
+    const priorityCoins = getHighPriorityCoins(3);
+    if (priorityCoins.length > 0) {
+      console.log(`\n⭐ High Priority Coins (trending overlap in last 48h):`);
+      priorityCoins.forEach((p, i) => {
+        console.log(`   ${i + 1}. $${p.base_asset} (score: ${p.priority_score.toFixed(1)}, trending hits: ${p.trending_hits}, posts: ${p.total_posts})`);
+      });
+    }
+
     console.log(`\n📊 Live Top Altcoin Gainers:`);
     top3.forEach((g, i) => {
-      console.log(`   ${i + 1}. $${g.baseAsset.padEnd(8)} (+${g.priceChangePercent.toFixed(2)}%) at $${formatPrice(g.lastPrice)}`);
+      const isTrend = isCoinTrending(g.baseAsset, trendingCoins);
+      console.log(`   ${i + 1}. $${g.baseAsset.padEnd(8)} (+${g.priceChangePercent.toFixed(2)}%) at $${formatPrice(g.lastPrice)}${isTrend ? ' 🔥 TRENDING' : ''}`);
     });
 
+    // 4. Select coin: boost priority coins that are also in top gainers
     let currentIndex = Number(getState("rotation_index") ?? 0);
     if (isNaN(currentIndex) || currentIndex < 0) currentIndex = 0;
 
-    const targetIndex = currentIndex % top3.length;
-    const currentCoin = top3[targetIndex];
+    let targetIndex = currentIndex % top3.length;
+    let currentCoin = top3[targetIndex];
 
-    console.log(`\n🎯 [${startTime}] Selected Top #${targetIndex + 1} Gainer: $${currentCoin.baseAsset} (+${currentCoin.priceChangePercent.toFixed(1)}%) at $${formatPrice(currentCoin.lastPrice)}`);
+    // If a high-priority coin is in top3, prioritize it (50% chance to override rotation)
+    if (priorityCoins.length > 0 && Math.random() < 0.5) {
+      const priorityMatch = top3.find(g => 
+        priorityCoins.some(p => p.base_asset === g.baseAsset)
+      );
+      if (priorityMatch) {
+        currentCoin = priorityMatch;
+        console.log(`[priority] ⭐ Boosted $${currentCoin.baseAsset} from priority list (trending overlap engagement)`);
+      }
+    }
+
+    const coinIsTrending = isCoinTrending(currentCoin.baseAsset, trendingCoins);
+    console.log(`\n🎯 [${startTime}] Selected: $${currentCoin.baseAsset} (+${currentCoin.priceChangePercent.toFixed(1)}%) at $${formatPrice(currentCoin.lastPrice)}${coinIsTrending ? ' [TRENDING 🔥]' : ''}`);
 
     // Generate trade setup via LLM
     console.log(`[ai] Generating post setup via ${LLM_PROVIDER.toUpperCase()}...`);
@@ -175,20 +261,23 @@ export async function executeRoundRobinCycle() {
       geminiKey: GEMINI_API_KEY,
       openrouterKey: OPENROUTER_API_KEY,
       model: LLM_MODEL,
+      trendingTopic: trendingTopic,
     });
 
-    console.log(`\n📝 ─── GENERATED POST CONTENT ───\n`);
+    const formatType = postContent.formatType || "TRADE_SIGNAL";
+
+    console.log(`\n📝 ─── GENERATED POST [${formatType}] ───\n`);
     console.log(postContent.text || postContent);
     console.log(`\n─────────────────────────────────\n`);
 
     // Publish to Binance Square
     if (BINANCE_SQUARE_API_KEY && BINANCE_SQUARE_API_KEY !== "your_binance_square_api_key_here") {
       await publishToSquare(postContent, BINANCE_SQUARE_API_KEY);
-      recordPost(currentCoin.symbol, currentCoin.category, currentCoin.lastPrice, currentCoin.priceChangePercent, postContent.text || postContent);
+      recordPost(currentCoin.symbol, currentCoin.category, currentCoin.lastPrice, currentCoin.priceChangePercent, postContent.text || postContent, currentCoin.baseAsset, formatType, coinIsTrending);
       console.log(`[cycle] ✅ Post published and recorded in database.`);
     } else {
       console.log(`[publish] ⚠️ BINANCE_SQUARE_API_KEY is not configured. Post generated successfully & logged.`);
-      recordPost(currentCoin.symbol, currentCoin.category, currentCoin.lastPrice, currentCoin.priceChangePercent, postContent.text || postContent);
+      recordPost(currentCoin.symbol, currentCoin.category, currentCoin.lastPrice, currentCoin.priceChangePercent, postContent.text || postContent, currentCoin.baseAsset, formatType, coinIsTrending);
     }
 
     // Advance rotation index for next 15-minute cycle (0 -> 1 -> 2 -> 0)

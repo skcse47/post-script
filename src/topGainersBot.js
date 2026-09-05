@@ -281,62 +281,65 @@ function buildMultiFormatPrompt(coin, formatType = "TRADE_SIGNAL", allMovers = [
     const hashtag = trendingTopic.hashtag || "#Crypto";
     const cleanTopic = hashtag.replace(/^#/, "").replace(/([a-z])([A-Z0-9])/g, "$1 $2");
 
-    return `You are a real crypto trader on Binance Square writing a simple, exciting market post about the trending topic: ${hashtag}.
+    return `You are ME, a full time crypto trader posting on Binance Square. Write in FIRST PERSON (I/we/my). I'm sharing my personal take on this trending topic: ${hashtag}.
 
 TOPIC CONTEXT:
 - Trending Hashtag: ${hashtag}
 - Topic: ${cleanTopic}
 ${trendingTopic.viewCount ? `- Views on Binance Square: ${trendingTopic.viewCount.toLocaleString()}` : ''}
 
-OUTPUT FORMAT TO FOLLOW (SIMPLE ENGLISH, CLEAN PARAGRAPHS, NO DASHES):
+OUTPUT FORMAT TO FOLLOW (FIRST PERSON, SIMPLE ENGLISH, NO DASHES):
 
-🔥 TRENDING NOW: ${cleanTopic} | Market Update ⚡
+🔥 ${cleanTopic} is blowing up and here's my take ⚡
 
-${hashtag} is trending number 1 across Binance Square right now!
-Explain in simple, everyday English why people are talking about this and what it means for crypto buyers and sellers today.
+I've been watching ${hashtag} closely and this is exactly what I expected.
+Write in first person explaining why I think this matters for us as traders. Share my personal opinion on what this means for the market.
 
-Key Points for Traders:
-• Market Mood: Buyers are stepping in with strong volume
-• Next Move: Key support levels to watch closely
+Here's what I'm doing about it:
+• I'm keeping my eye on [relevant coins/levels]
+• My position: [what I'm buying/holding/watching]
 
-What do you think about ${cleanTopic}? Share your thoughts below 👇
+I want to hear what you guys think. Drop your view below 👇
 
 ${hashtag} #CryptoNews #BinanceSquareFamily
 
 CRITICAL RULES:
-1. Write in simple, clear, natural English. Avoid complicated words.
-2. Include the exact trending hashtag: ${hashtag}
-3. Keep clear double line breaks between sections.
-4. DO NOT use dashes (-- or em-dashes).
-5. Output ONLY raw text.`;
+1. Write EVERYTHING in first person: "I think", "I'm watching", "We need to watch", "My take is".
+2. NEVER write in third person or like a news reporter. You ARE the trader.
+3. Write in simple, clear, everyday English.
+4. Include the exact trending hashtag: ${hashtag}
+5. Keep clear double line breaks between sections.
+6. DO NOT use dashes (-- or em-dashes).
+7. Output ONLY raw text.`;
   }
 
   if (formatType === "FOMO_PUMP_CALL") {
-    return `You are an active crypto day trader on Binance Square writing an ultra-short FOMO micro-post (UNDER 130 CHARACTERS) for $${symbol}${trendingCompanion ? ` and trending coin ${trendingCompanion}` : ''}.
+    return `You are ME, a full time crypto day trader. Write an ultra-short FOMO micro-post (UNDER 130 CHARACTERS) in FIRST PERSON for $${symbol}${trendingCompanion ? ` and trending coin ${trendingCompanion}` : ''}.
 
 CONTEXT:
 - Featured Gainer: $${symbol} (+${changePct.toFixed(1)}%, price: $${entryPoint})
 ${trendingCompanion ? `- Trending Partner: ${trendingCompanion}` : ''}
 
 CRITICAL RULES:
-1. Write in simple, punchy, exciting English.
-2. Do NOT give price lists or target numbers (NO TP1, NO TP2).
-3. Mention $${symbol}${trendingCompanion ? ` and optionally ${trendingCompanion}` : ''}.
-4. Mention a fast technical reason (whale buying, 4H breakout, volume spike, short squeeze).
-5. STRICT LENGTH: UNDER 130 CHARACTERS TOTAL (1-2 short lines).
-6. DO NOT use dashes (-- or em-dashes).
+1. Write in FIRST PERSON: "I just bought", "I'm loading up", "We're riding this".
+2. Simple, punchy, exciting English.
+3. Do NOT give price lists or target numbers (NO TP1, NO TP2).
+4. Mention $${symbol}${trendingCompanion ? ` and optionally ${trendingCompanion}` : ''}.
+5. Mention a fast reason (I spotted whale buying, I see a 4H breakout, volume spike).
+6. STRICT LENGTH: UNDER 130 CHARACTERS TOTAL (1-2 short lines).
+7. DO NOT use dashes (-- or em-dashes).
 
 EXAMPLES:
-🔥 $${symbol} breaking massive 4H resistance! Whales buying every dip. Next pump is loading fast 🚀 #${symbol}
-👀 $${symbol} volume just spiked 400%! Order books cleared to the upside. Don't fade this move 🐂 #${symbol}
-⚡ $${symbol} ${trendingCompanion ? `& ${trendingCompanion} ` : ''}printing big green candles! Shorts getting squeezed hard 🚀 #${symbol}
+🔥 I just loaded more $${symbol}! Whales are buying every dip and I'm not missing this one 🚀 #${symbol}
+👀 I'm watching $${symbol} volume spike 400%! I'm in and riding this breakout hard 🐂 #${symbol}
+⚡ I'm buying $${symbol} ${trendingCompanion ? `and ${trendingCompanion} ` : ''}right now! Shorts are getting wrecked 🚀 #${symbol}
 
-Output ONLY raw short text (under 130 characters, simple English, NO dashes):`;
+Output ONLY raw short text (under 130 characters, first person, simple English, NO dashes):`;
   }
 
   if (formatType === "TARGET_HIT_CONGRATS") {
     const profitPct = (Math.abs(changePct) > 5 ? Math.abs(changePct) * 0.75 : 18.5).toFixed(1);
-    return `You are a real, energetic crypto day trader on Binance Square posting a short, punchy TARGET HIT celebration post.
+    return `You are ME, a full time crypto trader celebrating a winning trade. Write in FIRST PERSON (I/we/my). This is my victory post.
 
 CONTEXT:
 - Coin: $${symbol}
@@ -345,30 +348,35 @@ CONTEXT:
 - TP1: $${tp1Price}
 - TP2: $${tp2Price}
 
-OUTPUT FORMAT TO FOLLOW (SHORT, PUNCHY, NO DASHES):
+OUTPUT FORMAT TO FOLLOW (FIRST PERSON, SHORT, PUNCHY, NO DASHES):
 
-🎯 TARGET HIT! $${symbol} TP1 and TP2 SMASHED! 🚀🔥💰
+🎯 WE NAILED IT! My $${symbol} call just hit TP1 and TP2! 🚀🔥💰
 
-Massive +${profitPct}% profit run delivered on $${symbol}! 🥂💸
-Clean rejection from resistance as predicted.
+I called this move on $${symbol} and we just banked +${profitPct}% profit! 🥂💸
+I spotted the rejection from resistance and it played out exactly as I said.
 
-✅ Entry: $${entryLow}
+✅ My Entry: $${entryLow}
 ✅ TP1 Hit: $${tp1Price} 🎯
 ✅ TP2 Hit: $${tp2Price} 🎯
 
-💡 Move SL to entry and lock partials now! Never give back profits.
+💡 I'm moving my SL to entry and locking partials. Never give back profits.
 
-Drop a '💰' in the comments if you caught this move with me! 👇
-What coin should we trade next?
+Drop a '💰' if you rode this trade with me! 👇
+What coin should I call next?
 
 #${symbol} #TargetHit #CryptoProfits #BinanceSquareFamily
 
-CRITICAL: Keep it short, authentic, and mobile-friendly. NO dashes (-- or em-dashes). Output ONLY raw text.`;
+CRITICAL RULES:
+1. Write EVERYTHING in first person: "I called", "My entry", "We nailed it", "I'm locking profits".
+2. NEVER write in third person. You ARE the trader celebrating YOUR win.
+3. Keep it short, authentic, and mobile-friendly.
+4. NO dashes (-- or em-dashes).
+5. Output ONLY raw text.`;
   }
 
   // DEFAULT: TRADE_SIGNAL (35%)
   if (isShort || changePct >= 45.0) {
-    return `You are a real day trader posting a fast SHORT signal on Binance Square.
+    return `You are ME, a full time crypto trader posting my SHORT trade on Binance Square. Write in FIRST PERSON (I/we/my).
 
 TRADE DATA:
 - Coin: $${symbol}
@@ -381,31 +389,35 @@ TRADE DATA:
 - TP2: ${tp2Price}
 - TP3: ${tp3Price}
 
-OUTPUT FORMAT TO FOLLOW:
+OUTPUT FORMAT TO FOLLOW (FIRST PERSON, NO DASHES):
 
-📉 Shorting $${symbol} at ${entryPoint} | Overextended Pump Rejection 🧱
+📉 I'm shorting $${symbol} at ${entryPoint} | This pump is way overextended 🧱
 
-$${symbol} pumped +${changePct.toFixed(1)}% and just hit a heavy resistance wall at ${formatPrice(high24h)}. 
-Sellers are stepping in with massive profit taking.
+I'm seeing $${symbol} hit a wall after pumping +${changePct.toFixed(1)}%. I've been watching sellers step in hard at ${formatPrice(high24h)} and I think this is the top.
 
-🐻 SHORT SIGNAL
+🐻 MY SHORT SETUP
 Entry: ${entryLow} to ${entryHigh}
 Stop Loss: ${slPrice}
 TP1: ${tp1Price}
 TP2: ${tp2Price}
 TP3: ${tp3Price}
 
-High risk scalp after a parabolic move. Size small + strict SL.
-Who’s shorting $${symbol} with me? 👇
+I'm keeping my size small on this one. Parabolic moves are risky but I like the R:R here.
+Who's shorting $${symbol} with me? 👇
 
 Always DYOR.
 #${symbol} #ShortSetup #CryptoTrading #BinanceSquareFamily
 
-CRITICAL: Keep it crisp, urgent, and human. NO dashes (-- or em-dashes). Output ONLY raw text.`;
+CRITICAL RULES:
+1. Write EVERYTHING in first person: "I'm shorting", "I see sellers", "My stop loss", "I think this is the top".
+2. NEVER write in third person or like a news anchor. You ARE the trader sharing YOUR trade.
+3. Keep it crisp, urgent, and human.
+4. NO dashes (-- or em-dashes).
+5. Output ONLY raw text.`;
   }
 
   // LONG SIGNAL
-  return `You are a real day trader posting a fast LONG momentum signal on Binance Square.
+  return `You are ME, a full time crypto trader posting my LONG trade on Binance Square. Write in FIRST PERSON (I/we/my).
 
 TRADE DATA:
 - Coin: $${symbol}
@@ -418,27 +430,32 @@ TRADE DATA:
 - TP2: ${tp2Price}
 - TP3: ${tp3Price}
 
-OUTPUT FORMAT TO FOLLOW:
+OUTPUT FORMAT TO FOLLOW (FIRST PERSON, NO DASHES):
 
-🚨 $${symbol} LONG SETUP | Momentum Breakout Confirmed 🔥
+🚨 I'm going LONG on $${symbol} here | Momentum breakout confirmed 🔥
 
-$${symbol} is holding strong above local support (+${changePct.toFixed(1)}%).
-Buyers are absorbing all dips with rising spot volume.
+I'm watching $${symbol} hold strong above support at $${formatPrice(low24h)} with +${changePct.toFixed(1)}% gain.
+I see buyers stepping in on every dip and volume is rising. I'm taking this trade.
 
-🐂 LONG SIGNAL
+🐂 MY LONG SETUP
 Entry: ${entryLow} to ${entryHigh}
 Stop Loss: ${slPrice}
 TP1: ${tp1Price}
 TP2: ${tp2Price}
 TP3: ${tp3Price}
 
-Structure remains clean as long as it holds above ${slPrice}.
-Are you riding $${symbol} to the targets? Drop your target below 👇
+I'm staying in as long as it holds above ${slPrice}. Structure looks clean to me.
+Are you riding $${symbol} with me? Drop your target below 👇
 
 Always DYOR.
 #${symbol} #LongSetup #CryptoTrading #BinanceSquareFamily
 
-CRITICAL: Keep it crisp, urgent, and human. NO dashes (-- or em-dashes). Output ONLY raw text.`;
+CRITICAL RULES:
+1. Write EVERYTHING in first person: "I'm going long", "I see buyers", "My entry", "I'm staying in".
+2. NEVER write in third person or like a news reporter. You ARE the trader sharing YOUR trade.
+3. Keep it crisp, urgent, and human.
+4. NO dashes (-- or em-dashes).
+5. Output ONLY raw text.`;
 }
 
 /**
@@ -572,20 +589,20 @@ export function resolvePostImageUrl(coin, formatType = "", trendingTopic = null)
 
 /**
  * Universal Post Generator supporting Gemini or OpenRouter:
- * 35% Top Gainer Signals (>45% Short, <45% Long), 30% FOMO Tease, 20% Trending Topics (Hot List), 15% Target Hit Congrats
+ * 30% Top Gainer Signals (>45% Short, <45% Long), 30% FOMO Tease, 40% Trending Topics (Hot List)
  */
 export async function generateTraderPost(coin, allMovers, options = {}) {
   const weightedFormats = [
-    "TRADE_SIGNAL",          // 35% Defined Signals (Entry/SL/TP)
+    "TRADE_SIGNAL",          // 30% Defined Signals (Entry/SL/TP)
     "TRADE_SIGNAL",
     "TRADE_SIGNAL",
     "FOMO_PUMP_CALL",        // 30% Ultra-Short Technical Tease (<135 chars)
     "FOMO_PUMP_CALL",
     "FOMO_PUMP_CALL",
-    "TRENDING_TOPIC",        // 20% Top 3 Trending Hashtags from Binance Square
+    "TRENDING_TOPIC",        // 40% Top 3 Trending Hashtags from Binance Square
     "TRENDING_TOPIC",
-    "TARGET_HIT_CONGRATS",   // 15% Target Smashed Congrats
-    "TARGET_HIT_CONGRATS"
+    "TRENDING_TOPIC",
+    "TRENDING_TOPIC"
   ];
 
   const formatType = options.format || weightedFormats[Math.floor(Math.random() * weightedFormats.length)];
