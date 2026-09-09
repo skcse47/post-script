@@ -272,10 +272,18 @@ async function tryPublishTrackRecord() {
 
 let isRunning = false;
 
+/**
+ * Run one full cycle.
+ *
+ * @returns {Promise<boolean>} true if the cycle completed, false if it errored.
+ *   CI schedulers need this: the cycle catches its own errors so the long running
+ *   scheduler survives a bad tick, which meant a one shot run always exited 0 even
+ *   when nothing was posted.
+ */
 export async function executeRoundRobinCycle() {
   if (isRunning) {
     console.log("[cycle] Previous cycle still running, skipping.");
-    return;
+    return false;
   }
 
   isRunning = true;
@@ -335,7 +343,7 @@ export async function executeRoundRobinCycle() {
     // 5. Roughly once a day, post the real track record instead of another setup.
     //    Receipts convert far better than another buy call, but only real ones.
     if (Math.random() < 0.12 && (await tryPublishTrackRecord())) {
-      return;
+      return true;
     }
 
     // 6. Select a coin, skipping anything already posted about recently.
@@ -361,7 +369,10 @@ export async function executeRoundRobinCycle() {
     }
 
     const coinIsTrending = isCoinTrending(currentCoin.baseAsset, trendingCoins);
-    console.log(`\n🎯 [${startTime}] Selected: $${currentCoin.baseAsset} (+${currentCoin.priceChangePercent.toFixed(1)}%) at $${formatPrice(currentCoin.lastPrice)}${coinIsTrending ? ' [TRENDING 🔥]' : ''}`);
+    // The queue falls through to losers once the cooldown filters out the top
+    // gainers, so a hardcoded "+" printed "+-3.6%".
+    const changeStr = `${currentCoin.priceChangePercent >= 0 ? "+" : ""}${currentCoin.priceChangePercent.toFixed(1)}%`;
+    console.log(`\n🎯 [${startTime}] Selected: $${currentCoin.baseAsset} (${changeStr}) at $${formatPrice(currentCoin.lastPrice)}${coinIsTrending ? ' [TRENDING 🔥]' : ''}`);
 
     // 7. Grade the chart. The verdict decides which kind of post gets written.
     const marketContext = await buildMarketContext(currentCoin);
@@ -430,9 +441,11 @@ export async function executeRoundRobinCycle() {
     const nextIndex = (targetIndex + 1) % pool.length;
     setState("rotation_index", nextIndex);
     console.log(`[queue] Next target: $${pool[nextIndex].baseAsset}`);
+    return true;
 
   } catch (err) {
     console.error(`[cycle] ❌ Error in cycle: ${err.message}`);
+    return false;
   } finally {
     isRunning = false;
   }
@@ -453,34 +466,61 @@ const CRON_EXPR =
     ? `0 */${Math.round(POST_INTERVAL_MINUTES / 60)} * * *`
     : `*/${POST_INTERVAL_MINUTES} * * * *`;
 
-console.log("=========================================================");
-console.log("⚡ Binance Square Evidence Based Signal Bot");
-console.log(`⏱️  Cron Schedule: every ${POST_INTERVAL_MINUTES} minutes (${CRON_EXPR})`);
-if (DRY_RUN) console.log("🧪 DRY_RUN is set. Posts will be generated and logged but NOT published.");
-console.log("🧭 Chart grade decides the format: TRADE, WATCH or NO_TRADE");
-console.log("📊 Calls are logged and graded against real candles");
-console.log("📁 SQLite DB: " + DB_PATH);
-console.log("=========================================================\n");
-
-const lastPostTime = getLastPostTime();
-const elapsedMinutes = (Date.now() - lastPostTime) / (60 * 1000);
-const guardMinutes = POST_INTERVAL_MINUTES * 0.8;
-
-if (lastPostTime > 0 && elapsedMinutes < guardMinutes) {
-  const waitMins = Math.ceil(POST_INTERVAL_MINUTES - elapsedMinutes);
-  console.log(`[startup] ⏳ Last post was published ${elapsedMinutes.toFixed(1)} mins ago.`);
-  console.log(`[startup] Waiting ~${waitMins} min for the next scheduled interval to prevent duplicate rapid posting.\n`);
-} else {
-  executeRoundRobinCycle();
+/**
+ * Whether a post is too recent to publish another one.
+ *
+ * Used by both the long running scheduler and the one shot runner. On GitHub
+ * Actions this is the only thing standing between a retried or duplicated workflow
+ * run and two posts in the same minute, so it is exported rather than inlined.
+ */
+export function tooSoonSinceLastPost() {
+  const lastPostTime = getLastPostTime();
+  if (lastPostTime <= 0) return null;
+  const elapsedMinutes = (Date.now() - lastPostTime) / (60 * 1000);
+  if (elapsedMinutes >= POST_INTERVAL_MINUTES * 0.8) return null;
+  return { elapsedMinutes, waitMins: Math.ceil(POST_INTERVAL_MINUTES - elapsedMinutes) };
 }
 
-cron.schedule(CRON_EXPR, () => {
-  executeRoundRobinCycle();
-});
+export function closeDb() {
+  try {
+    db.close();
+  } catch {}
+}
 
-// Clean shutdown
-process.on("SIGINT", () => {
-  console.log("\n👋 Stopping Signal Bot...");
-  db.close();
-  process.exit(0);
-});
+export function printBanner(mode) {
+  console.log("=========================================================");
+  console.log("⚡ Binance Square Evidence Based Signal Bot");
+  console.log(mode === "once" ? "🎯 Mode: single cycle, then exit" : `⏱️  Cron Schedule: every ${POST_INTERVAL_MINUTES} minutes (${CRON_EXPR})`);
+  if (DRY_RUN) console.log("🧪 DRY_RUN is set. Posts will be generated and logged but NOT published.");
+  console.log("🧭 Chart grade decides the format: TRADE, WATCH or NO_TRADE");
+  console.log("📊 Calls are logged and graded against real candles");
+  console.log("📁 SQLite DB: " + DB_PATH);
+  console.log("=========================================================\n");
+}
+
+// Only start the long running scheduler when this file is the entry point.
+// `src/runOnce.js` imports the cycle instead, and must not inherit a cron timer
+// that would keep the process alive forever on a CI runner.
+const isEntryPoint = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isEntryPoint) {
+  printBanner("cron");
+
+  const tooSoon = tooSoonSinceLastPost();
+  if (tooSoon) {
+    console.log(`[startup] ⏳ Last post was published ${tooSoon.elapsedMinutes.toFixed(1)} mins ago.`);
+    console.log(`[startup] Waiting ~${tooSoon.waitMins} min for the next scheduled interval to prevent duplicate rapid posting.\n`);
+  } else {
+    executeRoundRobinCycle();
+  }
+
+  cron.schedule(CRON_EXPR, () => {
+    executeRoundRobinCycle();
+  });
+
+  process.on("SIGINT", () => {
+    console.log("\n👋 Stopping Signal Bot...");
+    closeDb();
+    process.exit(0);
+  });
+}

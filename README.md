@@ -77,6 +77,47 @@ DRY_RUN=1 npm start
 | `LLM_MODEL` | qwen3-next-80b | Any model your provider supports |
 | `DRY_RUN` | unset | `DRY_RUN=1` generates and logs posts but publishes nothing and writes nothing to the database |
 
+## Deploying free
+
+**GitHub Pages will not work.** It serves static files only: no Node runtime, no
+scheduler, no secrets, no writable database. This bot needs all four.
+
+**GitHub Actions will**, and is free for public repositories.
+[`.github/workflows/post.yml`](.github/workflows/post.yml) runs one cycle on a
+schedule via `src/runOnce.js`.
+
+Setup:
+
+1. Repo **Settings -> Secrets and variables -> Actions -> Secrets**, add:
+   `BINANCE_SQUARE_API_KEY`, and `OPENROUTER_API_KEY` and/or `GEMINI_API_KEY`.
+2. Optionally add **Variables** to override defaults: `LLM_PROVIDER`, `LLM_MODEL`,
+   `POST_INTERVAL_MINUTES`, `COIN_COOLDOWN_HOURS`.
+3. Push, then run it once from the **Actions** tab with **Run workflow** and
+   `dry_run` ticked, to confirm it works before it posts for real.
+
+Things to know:
+
+- The schedule is hourly by default. Edit the `cron:` line to change it.
+- Actions cron is best effort. Runs are often 5 to 30 minutes late on the free tier
+  and are occasionally skipped entirely. Fine for a posting bot, not for anything
+  time critical.
+- Database state is committed to a separate `bot-state` branch after each run, so
+  the track record survives between runs without cluttering `main`.
+- GitHub disables scheduled workflows after ~60 days of repository inactivity and
+  emails you to re-enable them.
+- Free minutes are unlimited on public repos. On a private repo you get 2000
+  minutes a month, and this job uses roughly 1 to 2 minutes per run, so hourly
+  fits but every 15 minutes would not.
+
+### Alternatives
+
+| Host | Free? | Notes |
+|---|---|---|
+| GitHub Actions | Yes, public repos | Set up here. Best fit for a scheduled job |
+| Oracle Cloud Always Free | Yes | A real always-on VM. Most work to set up, most control, exact timing |
+| Fly.io | Small free allowance | Needs a card. Real long running process |
+| Render / Railway free tiers | Limited | Web services sleep, and cron is usually a paid feature |
+
 ## Files
 
 | File | Role |

@@ -1,0 +1,111 @@
+name: Post to Binance Square
+
+# GitHub Pages cannot run this bot: it serves static files only, with no Node
+# runtime, no scheduler, no secrets and no writable database. Scheduled Actions can,
+# and are free for public repositories.
+#
+# State lives on a separate `bot-state` branch rather than on main, so 24 database
+# commits a day do not bury your actual work. The track record depends on that state
+# surviving between runs, which is why this uses a branch and not actions/cache:
+# caches are evicted and losing them would silently reset the results you publish.
+
+on:
+  schedule:
+    # Hourly. Actions cron is best effort and often runs 5 to 30 minutes late on the
+    # free tier, so leave headroom rather than scheduling tightly. To post less
+    # often use "0 */2 * * *" (every 2 hours) or "0 8,12,16,20 * * *" (fixed times,
+    # UTC). Whatever you pick must be further apart than POST_INTERVAL_MINUTES or
+    # the bot's own spacing guard will skip the extra runs.
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Generate a post but do not publish it"
+        type: boolean
+        default: false
+      force:
+        description: "Ignore the minimum spacing since the last post"
+        type: boolean
+        default: false
+
+# Never let a delayed run overlap the next scheduled one and double post.
+concurrency:
+  group: binance-square-post
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        # Skip devDependencies: wrangler pulls in ~40 packages including the
+        # Cloudflare workerd binaries, none of which this job needs.
+        run: npm ci --omit=dev
+
+      - name: Restore bot state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git clone --depth=1 --branch bot-state --quiet "$REPO" state 2>/dev/null; then
+            cp state/gainers_history.db gainers_history.db
+            echo "Restored database ($(stat -c%s gainers_history.db) bytes)"
+          else
+            echo "No bot-state branch yet. Starting from the database in the repo."
+          fi
+
+      - name: Run one cycle
+        env:
+          BINANCE_SQUARE_API_KEY: ${{ secrets.BINANCE_SQUARE_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'qwen/qwen3-next-80b-a3b-instruct' }}
+          POST_INTERVAL_MINUTES: ${{ vars.POST_INTERVAL_MINUTES || '45' }}
+          COIN_COOLDOWN_HOURS: ${{ vars.COIN_COOLDOWN_HOURS || '6' }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          FORCE_POST: ${{ inputs.force && '1' || '' }}
+        run: node src/runOnce.js
+
+      - name: Save bot state
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # First run: create the orphan branch so state history stays off main.
+          if [ ! -d state ]; then
+            git clone --depth=1 --quiet "$REPO" state
+            cd state
+            git checkout --orphan bot-state
+            git rm -rf --quiet . || true
+            cd ..
+          fi
+
+          cp gainers_history.db state/gainers_history.db
+          cd state
+          git config user.name "binance-square-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gainers_history.db
+          if git diff --staged --quiet; then
+            echo "No state change to commit."
+          else
+            git commit --quiet -m "state: $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push --quiet "$REPO" HEAD:bot-state
+            echo "Saved bot state."
+          fi

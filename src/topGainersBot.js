@@ -21,14 +21,18 @@ const BINANCE_SQUARE_PUBLISH_URL =
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-// Candidate models for Gemini fallback
+// Candidate models tried in order before falling back to live discovery.
+//
+// This list WILL go stale. As of the last check gemini-2.0-flash, gemini-2.5-flash
+// and gemini-1.5-flash had all been retired and every one of them 404'd, which made
+// the provider look broken when it was only out of date. `discoverGeminiModel()`
+// asks the API what actually exists when these all fail, so a stale entry here
+// costs one wasted request rather than a dead bot.
 const GEMINI_CANDIDATE_MODELS = [
-  "gemini-2.0-flash",
+  "gemini-3.6-flash",
+  "gemini-flash-latest",
   "gemini-2.5-flash",
-  "gemini-1.5-flash-latest",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro",
-  "gemini-pro"
+  "gemini-2.0-flash",
 ];
 
 // Diverse watchlist of 80+ top traded & trending coins across AI, Layer 1s, Memes, DeFi, and RWA (NO BNB, ETH, XRP, BTC, SOL)
@@ -490,6 +494,13 @@ export function validatePostNumbers(text, ctx, levels) {
     // arithmetic on numbers we supplied, not invented levels.
     ctx.atr,
     levels?.stop ? ctx.price - levels.stop : null,
+
+    // The position sizing lesson asks for the size that risks 1% of a $1000 account
+    // across a stop one ATR wide. That produces a dollar figure like $136.98, which
+    // is a position size, not a price. It is deterministic from the ATR, so allow it
+    // rather than flagging correct arithmetic as a fabricated level.
+    ctx.atrPct ? 10 / (ctx.atrPct / 100) : null,
+    levels?.riskPct ? 10 / (levels.riskPct / 100) : null,
   ].filter((n) => typeof n === "number" && Number.isFinite(n));
 
   // Price levels only.
@@ -563,10 +574,17 @@ async function generateWithOpenRouter(prompt, apiKey, modelName = "qwen/qwen-2.5
   }
 
   const json = await res.json();
-  const text = json?.choices?.[0]?.message?.content?.trim();
+  const choice = json?.choices?.[0];
+  const text = choice?.message?.content?.trim();
 
   if (!text) {
     throw new Error(`OpenRouter returned empty response: ${JSON.stringify(json)}`);
+  }
+
+  // Same guard as Gemini: never publish a post that stopped mid sentence because it
+  // ran out of tokens. Reasoning models configured here will hit this too.
+  if (choice?.finish_reason === "length") {
+    throw new Error(`OpenRouter model ${modelName} hit the token ceiling and returned a truncated post`);
   }
 
   console.log(`[openrouter] ✅ Successfully generated post via OpenRouter (${modelName})`);
@@ -584,7 +602,13 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
     generationConfig: {
       temperature: 0.9,
       topP: 0.95,
-      maxOutputTokens: 900,
+      // Gemini 3.x models are reasoning models and spend output tokens on internal
+      // thinking BEFORE emitting any text. Measured: ~2000 thought tokens for a
+      // short post. At the old 900 ceiling, thinking ate 865 of them and the post
+      // came back cut off mid sentence. There is no way to disable it on this API
+      // version (thinkingBudget and thinkingLevel are both rejected), so the budget
+      // has to cover thinking plus the answer.
+      maxOutputTokens: 4096,
     },
   };
 
@@ -605,23 +629,38 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
 
       if (!res.ok) {
         const errText = await res.text();
-        if (res.status === 404) {
-          console.warn(`[gemini] Model '${model}' returned 404, trying next fallback...`);
-          lastError = new Error(`Gemini API Error 404 (${model}): ${errText}`);
+        // 404 means the model is retired. 429/500/503 mean this particular model is
+        // busy or rate limited right now, which is common on the free tier for the
+        // newest model. Both are reasons to try the next model, not to abandon the
+        // whole provider: bailing to OpenRouter on a transient 503 was turning a few
+        // seconds of Gemini load into a completely failed cycle.
+        if ([404, 429, 500, 503].includes(res.status)) {
+          console.warn(`[gemini] Model '${model}' returned ${res.status}, trying next fallback...`);
+          lastError = new Error(`Gemini API Error ${res.status} (${model}): ${errText.slice(0, 200)}`);
           continue;
         }
         throw new Error(`Gemini API Error ${res.status} (${model}): ${errText}`);
       }
 
       const json = await res.json();
-      const text = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      const candidate = json?.candidates?.[0];
+      const text = candidate?.content?.parts?.[0]?.text?.trim();
+
+      // A truncated post is worse than no post: it publishes a sentence that stops
+      // halfway and makes the account look broken. Treat it as a failed attempt.
+      if (candidate?.finishReason === "MAX_TOKENS") {
+        const thoughts = json?.usageMetadata?.thoughtsTokenCount ?? 0;
+        console.warn(`[gemini] '${model}' hit the token ceiling (${thoughts} spent on thinking). Discarding truncated output.`);
+        lastError = new Error(`Gemini returned a truncated post from ${model}`);
+        continue;
+      }
 
       if (text) {
         console.log(`[gemini] ✅ Successfully generated post using model: ${model}`);
         return text;
       }
     } catch (err) {
-      if (err.message.includes("404")) {
+      if (/\b(404|429|500|503)\b/.test(err.message)) {
         lastError = err;
         continue;
       }
@@ -629,7 +668,81 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
     }
   }
 
+  // Every hardcoded candidate 404'd, which means Google retired them all. Rather
+  // than keep shipping a list that goes stale every few months, ask the API which
+  // models this key can actually use and retry with the newest flash one.
+  const discovered = await discoverGeminiModel(apiKey);
+  if (discovered && !modelsToTry.includes(discovered)) {
+    console.log(`[gemini] Retrying with auto discovered model: ${discovered}`);
+    const res = await fetch(`${GEMINI_API_BASE}/${discovered}:generateContent?key=${apiKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const text = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      if (text) {
+        console.log(`[gemini] ✅ Successfully generated post using model: ${discovered}`);
+        console.log(`[gemini] 💡 Set LLM_MODEL=${discovered} in .env to skip the fallback scan next time.`);
+        return text;
+      }
+    } else {
+      lastError = new Error(`Gemini API Error ${res.status} (${discovered}): ${await res.text()}`);
+    }
+  }
+
   throw lastError || new Error("All Gemini candidate models failed.");
+}
+
+// Discovered once per process; the ListModels call is not worth repeating per post.
+let cachedGeminiModel = null;
+
+/**
+ * Ask the Gemini API which models this key can use, and pick the newest flash tier
+ * one that supports generateContent.
+ *
+ * The hardcoded candidate list went completely stale: gemini-2.0-flash,
+ * gemini-2.5-flash and gemini-1.5-flash were all retired, so every fallback 404'd
+ * and the provider looked broken when it was only out of date.
+ */
+export async function discoverGeminiModel(apiKey) {
+  if (cachedGeminiModel !== null) return cachedGeminiModel;
+  try {
+    const res = await fetch(`${GEMINI_API_BASE}?key=${apiKey}&pageSize=200`);
+    if (!res.ok) {
+      const body = await res.text();
+      console.warn(`[gemini] Could not list models (HTTP ${res.status}): ${body.slice(0, 160)}`);
+      cachedGeminiModel = false;
+      return false;
+    }
+    const json = await res.json();
+    const usable = (json.models || [])
+      .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
+      .map((m) => m.name.replace(/^models\//, ""))
+      // Skip previews, experimental builds and non text variants; they are the ones
+      // most likely to disappear or behave oddly mid run.
+      .filter((n) => !/(preview|exp|thinking|image|audio|tts|embedding|vision)/i.test(n));
+
+    // Prefer flash for cost, then anything else. Higher version numbers first.
+    const score = (n) => {
+      const v = parseFloat((n.match(/(\d+\.?\d*)/) || [])[1] || "0");
+      return (/flash/i.test(n) ? 1000 : 0) + v;
+    };
+    usable.sort((a, b) => score(b) - score(a));
+
+    cachedGeminiModel = usable[0] || false;
+    if (cachedGeminiModel) {
+      console.log(`[gemini] Discovered ${usable.length} usable models, picked: ${cachedGeminiModel}`);
+    } else {
+      console.warn(`[gemini] The API listed no usable text models for this key.`);
+    }
+    return cachedGeminiModel;
+  } catch (err) {
+    console.warn(`[gemini] Model discovery failed: ${err.message}`);
+    cachedGeminiModel = false;
+    return false;
+  }
 }
 
 /**
@@ -739,8 +852,11 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
 
   let formatType = options.format || weightedFormats[Math.floor(Math.random() * weightedFormats.length)];
 
-  // A signal without usable levels is not a signal.
+  // A signal without usable levels is not a signal. This fires when a NO_TRADE chart
+  // is asked for EVIDENCE_SIGNAL, including via the test harness, so say so out loud
+  // rather than silently writing a different kind of post.
   if (formatType === "EVIDENCE_SIGNAL" && !grade.levels?.stop) {
+    console.log(`[ai] ${grade.verdict} chart has no tradeable levels, writing TEACH instead of EVIDENCE_SIGNAL.`);
     formatType = "TEACH";
   }
 
@@ -787,12 +903,14 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
       const key = provider === "openrouter" ? options.openrouterKey : options.geminiKey;
       if (!key) continue;
       try {
+        // LLM_MODEL names a model on the PRIMARY provider only. Passing it to the
+        // fallback sent "gemini-3.8-flash" to OpenRouter, which is not a model it
+        // has; the fallback must use its own default instead.
+        const model = provider === primary ? options.model : undefined;
         if (provider === "openrouter") {
-          return await generateWithOpenRouter(p, key, options.model || "qwen/qwen-2.5-7b-instruct");
+          return await generateWithOpenRouter(p, key, model || "qwen/qwen-2.5-7b-instruct");
         }
-        // The configured model name belongs to the primary provider, so only pass it
-        // through when Gemini is the primary.
-        return await generateWithGemini(p, key, primary === "gemini" ? options.model : undefined);
+        return await generateWithGemini(p, key, model);
       } catch (err) {
         lastErr = err;
         console.warn(`[ai] ${provider} failed: ${err.message.slice(0, 160)}`);
