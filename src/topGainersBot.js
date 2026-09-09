@@ -7,6 +7,8 @@
  * with dynamic catchy opening hooks, explicit dollar price levels, and clickable coin cashtags ($BTC, $SOL, etc.).
  */
 
+import { buildMarketContext, gradeSetup, fmtCompact } from "./marketContext.js";
+
 const BINANCE_TICKER_URLS = [
   "https://data-api.binance.vision/api/v3/ticker/24hr",
   "https://api.binance.com/api/v3/ticker/24hr",
@@ -74,6 +76,16 @@ export function formatPrice(num) {
   if (num >= 0.01) return num.toFixed(5);
   if (num >= 0.0001) return num.toFixed(6);
   return num.toFixed(8);
+}
+
+/**
+ * Null-safe price formatter for prompt building. A missing level must never render
+ * as "NaN" or crash mid-prompt; it renders as "n/a" and the format that needed it
+ * is not selected in the first place.
+ */
+function px(num) {
+  if (num === null || num === undefined || Number.isNaN(num) || !Number.isFinite(num)) return "n/a";
+  return formatPrice(num);
 }
 
 /**
@@ -241,221 +253,279 @@ export async function getHotTrendingHashtags(limit = 3) {
 }
 
 /**
- * Build human-written, urgent, concise, high-converting posts without dashes.
+ * Build the post prompt.
+ *
+ * Design notes, because the previous version is why engagement was flat:
+ *
+ * - Every post was a buy call. A feed that is bullish 100% of the time, every 15
+ *   minutes, on whatever is already up the most, is indistinguishable from a pump
+ *   account. NO_TRADE_CALL and LEVEL_ALERT exist so the account is seen refusing
+ *   trades, which is the single cheapest credibility signal available.
+ * - Levels were current price x a fixed multiplier, identical on every coin. Now
+ *   they come from `marketContext.gradeSetup` and differ per chart.
+ * - Claims were unfalsifiable ("I see buyers stepping in"). Now the model is handed
+ *   real measurements and forbidden from inventing any others.
+ * - TARGET_HIT_CONGRATS fabricated wins for trades that were never called. Deleted.
+ *   Real results come from `trackRecord`, assembled in code, not by a model.
+ *
  * Formats:
- * 1. TRADE_SIGNAL (35%): Fast momentum breakout signal for active gainers
- * 2. FOMO_PUMP_CALL (30%): Ultra-short (<150 letters) technical hype featuring gainers + trending coins
- * 3. TRENDING_TOPIC (20%): Viral insights on Top 3 trending hashtags from Binance Square
- * 4. TARGET_HIT_CONGRATS (15%): Celebration post with winning emojis for hit TP targets
+ *   EVIDENCE_SIGNAL  a setup with real levels, real risk, stated invalidation
+ *   NO_TRADE_CALL    a public pass, with the reason
+ *   LEVEL_ALERT      one specific level and what it means, short
+ *   TEACH            one lesson taught through the live chart
+ *   TRENDING_TOPIC   an opinion on a trending hashtag with an actual position in it
+ *   QUICK_TAKE       short, but built around one verifiable number
  */
-function buildMultiFormatPrompt(coin, formatType = "TRADE_SIGNAL", allMovers = [], trendingTopic = null) {
-  const currentPrice = coin.lastPrice;
-  const changePct = coin.priceChangePercent;
-  const symbol = coin.baseAsset;
-  const high24h = coin.highPrice;
-  const low24h = coin.lowPrice;
-  const isShort = coin.defaultDirection === "SHORT" || changePct >= 45.0;
+function buildMultiFormatPrompt(coin, formatType = "EVIDENCE_SIGNAL", allMovers = [], trendingTopic = null, grade = null) {
+  const symbol = coin?.baseAsset || "MARKET";
+  const ctx = grade?.ctx || null;
+  const levels = grade?.levels || null;
 
-  const entryPoint = formatPrice(currentPrice);
-  const entryLow = formatPrice(currentPrice * 0.993);
-  const entryHigh = formatPrice(currentPrice * 1.007);
-  const slPrice = isShort ? formatPrice(currentPrice * 1.045) : formatPrice(currentPrice * 0.955);
-  const tp1Price = isShort ? formatPrice(currentPrice * 0.955) : formatPrice(currentPrice * 1.048);
-  const tp2Price = isShort ? formatPrice(currentPrice * 0.910) : formatPrice(currentPrice * 1.095);
-  const tp3Price = isShort ? formatPrice(currentPrice * 0.860) : formatPrice(currentPrice * 1.155);
+  // Only measurements that came off real candles are ever put in front of the model.
+  const evidence = (grade?.reasons || []).map((r) => `- ${r}`).join("\n");
+  const risks = (grade?.warnings || []).map((r) => `- ${r}`).join("\n");
 
-  // Pick trending coin from hot list or other top gainer
-  let trendingCompanion = "";
-  if (trendingTopic?.trendingCoins && trendingTopic.trendingCoins.length > 0) {
-    const matched = trendingTopic.trendingCoins.find(c => c !== symbol);
-    if (matched) trendingCompanion = `$${matched}`;
+  const factBlock = ctx
+    ? `VERIFIED MARKET DATA for $${symbol} (every number below is measured from Binance candles, do not alter any of them):
+- Price: $${px(ctx.price)}
+- 24h change: ${ctx.changePct >= 0 ? "+" : ""}${ctx.changePct.toFixed(1)}%
+- 24h range: $${px(ctx.rangeLow)} to $${px(ctx.rangeHigh)}, price is sitting at ${ctx.rangePos.toFixed(0)}% of that range
+- 7 day high: $${px(ctx.high7d)} (price is ${ctx.pctFrom7dHigh.toFixed(1)}% from it)
+- 1h RSI: ${ctx.rsi1h !== null ? ctx.rsi1h.toFixed(0) : "n/a"}
+- 24h volume: $${fmtCompact(ctx.last24Vol)}, which is ${ctx.volRatio.toFixed(1)}x the 7 day average
+- 1h ATR: ${ctx.atrPct !== null ? ctx.atrPct.toFixed(1) : "n/a"}% of price (this is the normal hourly swing)
+- Last 1h swing low: $${px(ctx.swingLow1h)}   Last 1h swing high: $${px(ctx.swingHigh1h)}`
+    : `MARKET DATA for $${symbol}: price $${px(coin?.lastPrice || 0)}, 24h change ${(coin?.priceChangePercent || 0).toFixed(1)}%.`;
+
+  const VOICE = `VOICE AND HONESTY RULES (these override everything else):
+1. You are a systematic trader who publishes levels from a screener. Write in first person.
+2. NEVER claim you already bought, already sold, or already made money. You have no proof of that and readers assume it is a lie. Say what the setup is and what you would do, not what you supposedly did.
+3. NEVER invent a number. Use ONLY the measured values above. If you want to make a point you have no number for, do not make the point.
+4. NEVER promise an outcome. No "guaranteed", no "easy money", no "this WILL pump", no "100x".
+5. No hype punctuation walls. Maximum 4 emojis in the whole post.
+6. Lead with the specific number, not with excitement. "Volume is 3.2x average" beats "MASSIVE VOLUME".
+7. Do not use dashes (-- or em-dashes).
+8. Simple everyday English. Short lines. Mobile readers.
+9. Output ONLY the raw post text, no preamble, no explanation of what you wrote.`;
+
+  // ---------------------------------------------------------------- NO_TRADE
+  if (formatType === "NO_TRADE_CALL") {
+    return `Write a Binance Square post where you publicly PASS on $${symbol} and explain why.
+
+This post exists to show readers you say no. It is the most valuable post type on the account, so do not soften it into a buy call.
+
+${factBlock}
+
+WHY THIS IS A PASS:
+${risks || `- The evidence for continuation is not strong enough to justify the risk here.`}
+
+WHAT WOULD CHANGE YOUR MIND (use these exact levels, do not invent your own):
+- An hourly close and hold above $${px(ctx?.swingHigh1h ?? coin?.highPrice)}
+- Or a pullback that holds $${px(ctx?.swingLow1h ?? coin?.lowPrice)} and bounces from it
+
+STRUCTURE TO FOLLOW:
+Line 1: a hook that states the pass plainly. Example shape: "$${symbol} is up ${Math.abs(coin?.priceChangePercent || 0).toFixed(0)}% today and I am not touching it. Here is the number that stopped me."
+Then: the specific measured reason, in 2 or 3 short lines.
+Then: exactly what you need to see before this becomes a trade, with the price level.
+Then: one honest line admitting this could keep running without you, and that missing a move costs nothing while a bad entry costs real money.
+Then: ask readers who ARE in the trade what their invalidation level is. Genuine question, not bait.
+End with: "Not financial advice. My levels, my risk." and the tags #${symbol} #RiskManagement
+
+${VOICE}`;
   }
-  if (!trendingCompanion) {
-    trendingCompanion = (allMovers || [])
-      .filter((m) => m.baseAsset && m.baseAsset !== symbol && m.priceChangePercent > 5)
-      .slice(0, 1)
-      .map((m) => `$${m.baseAsset}`)[0] || "";
+
+  // ------------------------------------------------------------- LEVEL_ALERT
+  if (formatType === "LEVEL_ALERT") {
+    const key = ctx?.swingHigh1h || coin?.highPrice;
+    return `Write a SHORT Binance Square post (under 400 characters) about one single price level on $${symbol}.
+
+${factBlock}
+
+THE LEVEL: $${px(key)}
+
+STRUCTURE:
+Line 1: name the level and why it matters, in one sentence.
+Line 2: what it means if price closes above it.
+Line 3: what it means if it fails.
+Last line: ask readers which side they are leaning. Tags: #${symbol}
+
+No entry, no targets, no stop in this post. It is a heads up, not a signal. Keep it under 400 characters total.
+
+${VOICE}`;
   }
 
+  // -------------------------------------------------------------------- TEACH
+  if (formatType === "TEACH") {
+    const lessons = [
+      {
+        topic: "position sizing",
+        angle: `Use $${symbol} as the live example. Its 1h ATR is ${ctx?.atrPct?.toFixed(1) || "high"}% of price, so show the reader how to work out a size where a stop that far away only costs 1% of the account. Do the arithmetic on a $1000 account so it is concrete.`,
+      },
+      {
+        topic: "why chasing the top gainer usually loses",
+        angle: `$${symbol} is up ${(coin?.priceChangePercent || 0).toFixed(0)}% and sitting at ${ctx?.rangePos?.toFixed(0) || "the top"}% of its 24h range. Explain who is selling to a buyer at this price and what that means for the odds.`,
+      },
+      {
+        topic: "reading volume properly",
+        angle: `$${symbol} volume is ${ctx?.volRatio?.toFixed(1) || "elevated"}x its 7 day average. Explain the difference between a move with volume behind it and a move without, and how to check that ratio yourself in 20 seconds.`,
+      },
+      {
+        topic: "where a stop actually belongs",
+        angle: `Explain that a stop belongs below the level that proves you wrong, not at a round percentage. Use $${symbol}: its last 1h swing low is $${px(ctx?.swingLow1h || 0)}, and its normal hourly swing is ${ctx?.atrPct?.toFixed(1) || "n/a"}%, so a tighter stop than that gets hit by noise alone.`,
+      },
+    ];
+    const lesson = lessons[Math.floor(Math.random() * lessons.length)];
+
+    return `Write a Binance Square post that TEACHES one thing: ${lesson.topic}.
+
+${factBlock}
+
+THE ANGLE: ${lesson.angle}
+
+STRUCTURE:
+Line 1: a hook that names the mistake most people make. No coin hype.
+Then: teach it in 4 to 6 short lines, using the real $${symbol} numbers as the worked example. Show the actual arithmetic.
+Then: one line on what to do differently on the next trade.
+Then: ask readers what their own rule is for this. Tags: #TradingTips #${symbol}
+
+This post is not a signal. Do not give an entry or a target.
+
+${VOICE}`;
+  }
+
+  // ---------------------------------------------------------- TRENDING_TOPIC
   if (formatType === "TRENDING_TOPIC" && trendingTopic) {
     const hashtag = trendingTopic.hashtag || "#Crypto";
     const cleanTopic = hashtag.replace(/^#/, "").replace(/([a-z])([A-Z0-9])/g, "$1 $2");
+    return `Write a Binance Square post giving your genuine take on the trending topic ${hashtag}.
 
-    return `You are ME, a full time crypto trader posting on Binance Square. Write in FIRST PERSON (I/we/my). I'm sharing my personal take on this trending topic: ${hashtag}.
+TOPIC: ${cleanTopic}
+${trendingTopic.viewCount ? `This topic has ${trendingTopic.viewCount.toLocaleString()} views on Binance Square right now.` : ""}
+${trendingTopic.topSnippet ? `Context being discussed: ${trendingTopic.topSnippet}` : ""}
 
-TOPIC CONTEXT:
-- Trending Hashtag: ${hashtag}
-- Topic: ${cleanTopic}
-${trendingTopic.viewCount ? `- Views on Binance Square: ${trendingTopic.viewCount.toLocaleString()}` : ''}
+STRUCTURE:
+Line 1: a hook that takes an actual position on the topic. Not "here is what is happening". Something a reader could disagree with.
+Then: 3 or 4 short lines on why you hold that view, and what it changes for a trader specifically.
+Then: state plainly what you are doing about it, including if the answer is nothing.
+Then: name the thing that would prove your view wrong. This is the part that makes people trust you, do not skip it.
+Then: ask readers for the opposite view. Tags: ${hashtag}
 
-OUTPUT FORMAT TO FOLLOW (FIRST PERSON, SIMPLE ENGLISH, NO DASHES):
+IMPORTANT: if you do not have real information about this topic beyond the hashtag itself, write about what the topic trending TELLS you about market attention and positioning, rather than inventing news, numbers, partnerships, or events. Never state a fact you were not given.
 
-🔥 ${cleanTopic} is blowing up and here's my take ⚡
-
-I've been watching ${hashtag} closely and this is exactly what I expected.
-Write in first person explaining why I think this matters for us as traders. Share my personal opinion on what this means for the market.
-
-Here's what I'm doing about it:
-• I'm keeping my eye on [relevant coins/levels]
-• My position: [what I'm buying/holding/watching]
-
-I want to hear what you guys think. Drop your view below 👇
-
-${hashtag} #CryptoNews #BinanceSquareFamily
-
-CRITICAL RULES:
-1. Write EVERYTHING in first person: "I think", "I'm watching", "We need to watch", "My take is".
-2. NEVER write in third person or like a news reporter. You ARE the trader.
-3. Write in simple, clear, everyday English.
-4. Include the exact trending hashtag: ${hashtag}
-5. Keep clear double line breaks between sections.
-6. DO NOT use dashes (-- or em-dashes).
-7. Output ONLY raw text.`;
+${VOICE}`;
   }
 
-  if (formatType === "FOMO_PUMP_CALL") {
-    return `You are ME, a full time crypto day trader. Write an ultra-short FOMO micro-post (UNDER 130 CHARACTERS) in FIRST PERSON for $${symbol}${trendingCompanion ? ` and trending coin ${trendingCompanion}` : ''}.
+  // -------------------------------------------------------------- QUICK_TAKE
+  if (formatType === "QUICK_TAKE") {
+    return `Write a very short Binance Square post about $${symbol}, under 220 characters.
 
-CONTEXT:
-- Featured Gainer: $${symbol} (+${changePct.toFixed(1)}%, price: $${entryPoint})
-${trendingCompanion ? `- Trending Partner: ${trendingCompanion}` : ''}
+${factBlock}
 
-CRITICAL RULES:
-1. Write in FIRST PERSON: "I just bought", "I'm loading up", "We're riding this".
-2. Simple, punchy, exciting English.
-3. Do NOT give price lists or target numbers (NO TP1, NO TP2).
-4. Mention $${symbol}${trendingCompanion ? ` and optionally ${trendingCompanion}` : ''}.
-5. Mention a fast reason (I spotted whale buying, I see a 4H breakout, volume spike).
-6. STRICT LENGTH: UNDER 130 CHARACTERS TOTAL (1-2 short lines).
-7. DO NOT use dashes (-- or em-dashes).
+It must be built around ONE specific measured number from the data above, and it must say something useful. Not "this is pumping". Something like the volume ratio, the RSI reading, the distance from the 7 day high, or where price sits in its range, and what that one number implies.
 
-EXAMPLES:
-🔥 I just loaded more $${symbol}! Whales are buying every dip and I'm not missing this one 🚀 #${symbol}
-👀 I'm watching $${symbol} volume spike 400%! I'm in and riding this breakout hard 🐂 #${symbol}
-⚡ I'm buying $${symbol} ${trendingCompanion ? `and ${trendingCompanion} ` : ''}right now! Shorts are getting wrecked 🚀 #${symbol}
+End with a short question. Tag: #${symbol}
 
-Output ONLY raw short text (under 130 characters, first person, simple English, NO dashes):`;
+Under 220 characters total.
+
+${VOICE}`;
   }
 
-  if (formatType === "TARGET_HIT_CONGRATS") {
-    const profitPct = (Math.abs(changePct) > 5 ? Math.abs(changePct) * 0.75 : 18.5).toFixed(1);
-    return `You are ME, a full time crypto trader celebrating a winning trade. Write in FIRST PERSON (I/we/my). This is my victory post.
+  // --------------------------------------------------------- EVIDENCE_SIGNAL
+  const isWatch = grade?.verdict === "WATCH" || grade?.verdict === "WATCH";
+  const rr = levels?.targetR?.[0] || 1.5;
 
-CONTEXT:
-- Coin: $${symbol}
-- Current Price: $${entryPoint}
-- Target Profit: +${profitPct}%
-- TP1: $${tp1Price}
-- TP2: $${tp2Price}
+  return `Write a Binance Square post presenting a ${isWatch ? "tentative" : "clean"} long setup on $${symbol}.
 
-OUTPUT FORMAT TO FOLLOW (FIRST PERSON, SHORT, PUNCHY, NO DASHES):
+${factBlock}
 
-🎯 WE NAILED IT! My $${symbol} call just hit TP1 and TP2! 🚀🔥💰
+THE EVIDENCE THAT SUPPORTS IT:
+${evidence || "- Momentum and volume are constructive."}
 
-I called this move on $${symbol} and we just banked +${profitPct}% profit! 🥂💸
-I spotted the rejection from resistance and it played out exactly as I said.
+THE RISKS, WHICH YOU MUST INCLUDE IN THE POST:
+${risks || "- Any breakdown of the swing low invalidates the idea immediately."}
 
-✅ My Entry: $${entryLow}
-✅ TP1 Hit: $${tp1Price} 🎯
-✅ TP2 Hit: $${tp2Price} 🎯
+THE LEVELS, USE THESE EXACTLY AND DO NOT RECALCULATE THEM:
+Entry zone: $${px(levels?.entryLow)} to $${px(levels?.entryHigh)}
+Stop loss: $${px(levels?.stop)}, which is ${levels?.riskPct?.toFixed(1)}% away and sits under the last swing low at $${px(levels?.invalidation)}
+TP1: $${px(levels?.targets?.[0])} (${levels?.targetR?.[0]}R)
+TP2: $${px(levels?.targets?.[1])} (${levels?.targetR?.[1]}R)
+TP3: $${px(levels?.targets?.[2])} (${levels?.targetR?.[2]}R)
+${levels?.notes?.length ? `Note to include: ${levels.notes.join(" ")}` : ""}
 
-💡 I'm moving my SL to entry and locking partials. Never give back profits.
+STRUCTURE TO FOLLOW:
+Line 1: a hook built on the strongest measured fact, not on excitement. It should make a reader want to check the chart.
+Then: 2 or 3 short lines explaining the setup using the evidence above. Every claim must map to a number you were given.
+Then: the levels, laid out clean and scannable, entry then stop then the three targets. Mention that risking to the stop is ${levels?.riskPct?.toFixed(1)}% and the first target pays ${rr}R.
+Then: a line naming exactly what kills the idea. Use the stop level. Say plainly that if it closes below there you are out and not arguing with it.
+Then: include at least one of the risks above, honestly. ${isWatch ? "Say clearly this is a watch and not a full size entry, and why." : ""}
+Then: ask a real question that invites disagreement. Something like whether readers see the same level, or what would make them fade this.
+End with: "Not financial advice. My levels, my risk. Size so a stop out does not hurt." and tags #${symbol} #TradingSetup
 
-Drop a '💰' if you rode this trade with me! 👇
-What coin should I call next?
+${VOICE}`;
+}
 
-#${symbol} #TargetHit #CryptoProfits #BinanceSquareFamily
+/**
+ * Check that every dollar figure in the post is a number we actually supplied.
+ *
+ * LLMs fill gaps. Given a prompt slot it has no data for, a model will happily
+ * produce a confident, specific, invented price level, and a reader who charts it
+ * and finds nothing there never trusts the account again. This is the last gate
+ * before publishing: any price that is not one we handed the model, and not inside
+ * the coin's real 7 day range, fails the post.
+ *
+ * @returns {{ok: boolean, offenders: string[]}}
+ */
+export function validatePostNumbers(text, ctx, levels) {
+  if (!ctx) return { ok: true, offenders: [] };
 
-CRITICAL RULES:
-1. Write EVERYTHING in first person: "I called", "My entry", "We nailed it", "I'm locking profits".
-2. NEVER write in third person. You ARE the trader celebrating YOUR win.
-3. Keep it short, authentic, and mobile-friendly.
-4. NO dashes (-- or em-dashes).
-5. Output ONLY raw text.`;
+  const allowed = [
+    ctx.price, ctx.rangeLow, ctx.rangeHigh, ctx.high7d, ctx.low7d,
+    ctx.swingLow1h, ctx.swingHigh1h, ctx.swingLow3d, ctx.swingHigh3d,
+    ctx.swingLow15m, ctx.swingHigh15m,
+    levels?.entryLow, levels?.entryHigh, levels?.stop, levels?.invalidation,
+    ...(levels?.targets || []),
+
+    // Derived quantities the TEACH format is explicitly asked to work out: the ATR
+    // expressed in dollars, and the distance from entry to stop. These are correct
+    // arithmetic on numbers we supplied, not invented levels.
+    ctx.atr,
+    levels?.stop ? ctx.price - levels.stop : null,
+  ].filter((n) => typeof n === "number" && Number.isFinite(n));
+
+  // Price levels only.
+  //
+  // The lookaheads stop the engine backtracking to a shorter number: without them
+  // "$15.4M" also matches as "$15", which then looks like an invented price. They
+  // are split so that a price ending a sentence ("...at $0.99000.") still matches,
+  // which a single `(?![\d.,])` would silently skip. The trailing suffix group
+  // catches volume figures ($15.4M) and percentages so they are not read as prices.
+  const matches = [...text.matchAll(/\$\s?(\d+(?:,\d{3})*(?:\.\d+)?)(?!\d)(?!,\d{3})(?!\.\d)\s*([KMBTkmbt%])?/g)];
+
+  const offenders = [];
+  for (const m of matches) {
+    if (m[2]) continue; // $15.4M volume, 5% etc, not a price level
+
+    // formatPrice always emits a decimal point, so every level we hand the model
+    // has one. A bare integer is an account size or a round rhetorical figure
+    // ("on a $1000 account, 1% is $10"), not a price level being claimed.
+    if (!m[1].includes(".")) continue;
+
+    const value = parseFloat(m[1].replace(/,/g, ""));
+    if (!Number.isFinite(value) || value === 0) continue;
+
+    // Tolerate rounding: 0.5% of the quoted value.
+    const nearAllowed = allowed.some((a) => Math.abs(value - a) <= Math.abs(a) * 0.005);
+    if (nearAllowed) continue;
+
+    // A price inside the real 7 day range is a defensible reference even if we did
+    // not hand it over verbatim. Anything outside it was invented.
+    const inRange = value >= ctx.low7d * 0.97 && value <= ctx.high7d * 1.03;
+    if (inRange) continue;
+
+    offenders.push(m[0]);
   }
 
-  // DEFAULT: TRADE_SIGNAL (35%)
-  if (isShort || changePct >= 45.0) {
-    return `You are ME, a full time crypto trader posting my SHORT trade on Binance Square. Write in FIRST PERSON (I/we/my).
-
-TRADE DATA:
-- Coin: $${symbol}
-- Current Price: $${entryPoint}
-- 24h Pump: +${changePct.toFixed(1)}% (Overextended peak!)
-- Resistance: $${formatPrice(high24h)}
-- Entry: ${entryLow} to ${entryHigh}
-- Stop Loss: ${slPrice}
-- TP1: ${tp1Price}
-- TP2: ${tp2Price}
-- TP3: ${tp3Price}
-
-OUTPUT FORMAT TO FOLLOW (FIRST PERSON, NO DASHES):
-
-📉 I'm shorting $${symbol} at ${entryPoint} | This pump is way overextended 🧱
-
-I'm seeing $${symbol} hit a wall after pumping +${changePct.toFixed(1)}%. I've been watching sellers step in hard at ${formatPrice(high24h)} and I think this is the top.
-
-🐻 MY SHORT SETUP
-Entry: ${entryLow} to ${entryHigh}
-Stop Loss: ${slPrice}
-TP1: ${tp1Price}
-TP2: ${tp2Price}
-TP3: ${tp3Price}
-
-I'm keeping my size small on this one. Parabolic moves are risky but I like the R:R here.
-Who's shorting $${symbol} with me? 👇
-
-Always DYOR.
-#${symbol} #ShortSetup #CryptoTrading #BinanceSquareFamily
-
-CRITICAL RULES:
-1. Write EVERYTHING in first person: "I'm shorting", "I see sellers", "My stop loss", "I think this is the top".
-2. NEVER write in third person or like a news anchor. You ARE the trader sharing YOUR trade.
-3. Keep it crisp, urgent, and human.
-4. NO dashes (-- or em-dashes).
-5. Output ONLY raw text.`;
-  }
-
-  // LONG SIGNAL
-  return `You are ME, a full time crypto trader posting my LONG trade on Binance Square. Write in FIRST PERSON (I/we/my).
-
-TRADE DATA:
-- Coin: $${symbol}
-- Current Price: $${entryPoint}
-- 24h Gain: +${changePct.toFixed(1)}% (Momentum continuation)
-- Support: $${formatPrice(low24h)}
-- Entry: ${entryLow} to ${entryHigh}
-- Stop Loss: ${slPrice}
-- TP1: ${tp1Price}
-- TP2: ${tp2Price}
-- TP3: ${tp3Price}
-
-OUTPUT FORMAT TO FOLLOW (FIRST PERSON, NO DASHES):
-
-🚨 I'm going LONG on $${symbol} here | Momentum breakout confirmed 🔥
-
-I'm watching $${symbol} hold strong above support at $${formatPrice(low24h)} with +${changePct.toFixed(1)}% gain.
-I see buyers stepping in on every dip and volume is rising. I'm taking this trade.
-
-🐂 MY LONG SETUP
-Entry: ${entryLow} to ${entryHigh}
-Stop Loss: ${slPrice}
-TP1: ${tp1Price}
-TP2: ${tp2Price}
-TP3: ${tp3Price}
-
-I'm staying in as long as it holds above ${slPrice}. Structure looks clean to me.
-Are you riding $${symbol} with me? Drop your target below 👇
-
-Always DYOR.
-#${symbol} #LongSetup #CryptoTrading #BinanceSquareFamily
-
-CRITICAL RULES:
-1. Write EVERYTHING in first person: "I'm going long", "I see buyers", "My entry", "I'm staying in".
-2. NEVER write in third person or like a news reporter. You ARE the trader sharing YOUR trade.
-3. Keep it crisp, urgent, and human.
-4. NO dashes (-- or em-dashes).
-5. Output ONLY raw text.`;
+  return { ok: offenders.length === 0, offenders };
 }
 
 /**
@@ -472,8 +542,8 @@ async function generateWithOpenRouter(prompt, apiKey, modelName = "qwen/qwen-2.5
         content: prompt,
       },
     ],
-    temperature: 0.9,
-    max_tokens: 1500,
+    temperature: 0.85,
+    max_tokens: 800,
   };
 
   const res = await fetch(OPENROUTER_API_URL, {
@@ -514,7 +584,7 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
     generationConfig: {
       temperature: 0.9,
       topP: 0.95,
-      maxOutputTokens: 2048,
+      maxOutputTokens: 900,
     },
   };
 
@@ -587,28 +657,96 @@ export function resolvePostImageUrl(coin, formatType = "", trendingTopic = null)
   return null;
 }
 
+// Coincap has no icon for most newly listed small caps, which are precisely the
+// coins this bot posts about. Attaching a 404 means the post renders with a broken
+// thumbnail in the feed, and a post with no working image gets a fraction of the
+// impressions. Verified once per symbol, then cached for the process lifetime.
+const imageUrlCache = new Map();
+
+const FALLBACK_IMAGES = [
+  "https://images.unsplash.com/photo-1642543492481-44e81e3914a7?w=800&auto=format&fit=crop&q=80",
+  "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop&q=80",
+];
+
+async function urlResolves(url) {
+  if (!url) return false;
+  if (imageUrlCache.has(url)) return imageUrlCache.get(url);
+  try {
+    const res = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(6000) });
+    const ok = res.ok;
+    imageUrlCache.set(url, ok);
+    if (!ok) console.warn(`[image] ${url} returned ${res.status}, not attaching it.`);
+    return ok;
+  } catch (err) {
+    imageUrlCache.set(url, false);
+    console.warn(`[image] Could not verify ${url}: ${err.message}`);
+    return false;
+  }
+}
+
+/** Resolve an image that is known to load, or null. */
+export async function resolveVerifiedImageUrl(coin, formatType = "", trendingTopic = null) {
+  const primary = resolvePostImageUrl(coin, formatType, trendingTopic);
+  if (await urlResolves(primary)) return primary;
+
+  for (const fallback of FALLBACK_IMAGES) {
+    if (await urlResolves(fallback)) return fallback;
+  }
+  return null;
+}
+
 /**
  * Universal Post Generator supporting Gemini or OpenRouter:
  * 30% Top Gainer Signals (>45% Short, <45% Long), 30% FOMO Tease, 40% Trending Topics (Hot List)
  */
 export async function generateTraderPost(coin, allMovers, options = {}) {
-  const weightedFormats = [
-    "TRADE_SIGNAL",          // 30% Defined Signals (Entry/SL/TP)
-    "TRADE_SIGNAL",
-    "TRADE_SIGNAL",
-    "FOMO_PUMP_CALL",        // 30% Ultra-Short Technical Tease (<135 chars)
-    "FOMO_PUMP_CALL",
-    "FOMO_PUMP_CALL",
-    "TRENDING_TOPIC",        // 40% Top 3 Trending Hashtags from Binance Square
-    "TRENDING_TOPIC",
-    "TRENDING_TOPIC",
-    "TRENDING_TOPIC"
-  ];
+  // The chart decides the format, not a dice roll. This is the important change:
+  // previously every outcome was some flavour of "buy this", so the feed was 100%
+  // bullish forever. Now a weak chart produces a public pass, and only a genuinely
+  // strong one produces a signal with levels.
+  const ctx = options.marketContext !== undefined ? options.marketContext : await buildMarketContext(coin);
+  const grade = options.grade || gradeSetup(ctx);
+  grade.ctx = ctx;
 
-  const formatType = options.format || weightedFormats[Math.floor(Math.random() * weightedFormats.length)];
+  let weightedFormats;
+  if (grade.verdict === "TRADE") {
+    weightedFormats = [
+      "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL",
+      "LEVEL_ALERT",
+      "TEACH",
+      "TRENDING_TOPIC",
+      "QUICK_TAKE",
+    ];
+  } else if (grade.verdict === "WATCH") {
+    weightedFormats = [
+      "LEVEL_ALERT", "LEVEL_ALERT",
+      "EVIDENCE_SIGNAL",
+      "TEACH", "TEACH",
+      "TRENDING_TOPIC",
+      "QUICK_TAKE",
+      "NO_TRADE_CALL",
+    ];
+  } else {
+    // Nothing tradable here. Say so, or teach instead. Never manufacture a setup
+    // just because the scheduler fired.
+    weightedFormats = [
+      "NO_TRADE_CALL", "NO_TRADE_CALL", "NO_TRADE_CALL",
+      "TEACH", "TEACH",
+      "TRENDING_TOPIC", "TRENDING_TOPIC",
+      "LEVEL_ALERT",
+    ];
+  }
+
+  let formatType = options.format || weightedFormats[Math.floor(Math.random() * weightedFormats.length)];
+
+  // A signal without usable levels is not a signal.
+  if (formatType === "EVIDENCE_SIGNAL" && !grade.levels?.stop) {
+    formatType = "TEACH";
+  }
+
   let trendingTopic = options.trendingTopic || null;
 
-  if ((formatType === "TRENDING_TOPIC" || formatType === "FOMO_PUMP_CALL") && !trendingTopic) {
+  if (formatType === "TRENDING_TOPIC" && !trendingTopic) {
     try {
       const hotList = await getHotTrendingHashtags(3);
       if (hotList && hotList.length > 0) {
@@ -620,30 +758,69 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
     }
   }
 
-  const targetName = formatType === "TRENDING_TOPIC" && trendingTopic ? trendingTopic.hashtag : `$${coin?.baseAsset || "MARKET"}`;
-  console.log(`[ai] Generating post content with format: [${formatType}] for ${targetName}`);
+  // TRENDING_TOPIC was selected but the hot list is unavailable; fall back to
+  // something grounded in the chart rather than posting about a topic we know
+  // nothing about.
+  if (formatType === "TRENDING_TOPIC" && !trendingTopic) {
+    formatType = grade.verdict === "NO_TRADE" ? "NO_TRADE_CALL" : "TEACH";
+  }
 
-  const prompt = buildMultiFormatPrompt(coin, formatType, allMovers, trendingTopic);
-  const imageUrl = resolvePostImageUrl(coin, formatType, trendingTopic);
+  const targetName = formatType === "TRENDING_TOPIC" && trendingTopic ? trendingTopic.hashtag : `$${coin?.baseAsset || "MARKET"}`;
+  console.log(`[ai] Format [${formatType}] for ${targetName} (verdict: ${grade.verdict}, score: ${grade.score})`);
+
+  const prompt = buildMultiFormatPrompt(coin, formatType, allMovers, trendingTopic, grade);
+  const imageUrl = await resolveVerifiedImageUrl(coin, formatType, trendingTopic);
   
   const rawProvider = String(options.provider || "").trim().toLowerCase();
   const isGemini = rawProvider === "1" || rawProvider === "gemini";
   const isOpenRouter = rawProvider === "openrouter" || rawProvider === "2" || (!isGemini && options.openrouterKey);
 
-  let text = "";
-  if (isOpenRouter) {
-    const key = options.openrouterKey || options.geminiKey;
-    if (!key) {
-      throw new Error("OPENROUTER_API_KEY is missing in .env");
+  // Try the configured provider, then fall back to the other one if a key exists.
+  // An out of credit or rate limited provider used to abort the whole cycle and skip
+  // the slot entirely; with both keys configured there is no reason for that.
+  const runModel = async (p) => {
+    const primary = isOpenRouter ? "openrouter" : "gemini";
+    const order = primary === "openrouter" ? ["openrouter", "gemini"] : ["gemini", "openrouter"];
+
+    let lastErr;
+    for (const provider of order) {
+      const key = provider === "openrouter" ? options.openrouterKey : options.geminiKey;
+      if (!key) continue;
+      try {
+        if (provider === "openrouter") {
+          return await generateWithOpenRouter(p, key, options.model || "qwen/qwen-2.5-7b-instruct");
+        }
+        // The configured model name belongs to the primary provider, so only pass it
+        // through when Gemini is the primary.
+        return await generateWithGemini(p, key, primary === "gemini" ? options.model : undefined);
+      } catch (err) {
+        lastErr = err;
+        console.warn(`[ai] ${provider} failed: ${err.message.slice(0, 160)}`);
+        if (provider !== order[order.length - 1]) console.warn(`[ai] Falling back to the other provider.`);
+      }
     }
-    const model = options.model || "qwen/qwen-2.5-7b-instruct";
-    text = await generateWithOpenRouter(prompt, key, model);
-  } else {
-    const key = options.geminiKey || options.openrouterKey;
-    if (!key) {
-      throw new Error("GEMINI_API_KEY is missing in .env");
+    throw lastErr || new Error("No LLM API key configured. Set OPENROUTER_API_KEY or GEMINI_API_KEY in .env");
+  };
+
+  let text = await runModel(prompt);
+
+  // Reject invented price levels and retry once with the offenders named. If the
+  // second attempt is still fabricating, fall through with a warning rather than
+  // silently publishing numbers that are not on the chart.
+  const check = validatePostNumbers(text, ctx, grade.levels);
+  if (!check.ok) {
+    console.warn(`[validate] ⚠️ Post contained price levels that are not in the data: ${check.offenders.join(", ")}. Retrying once.`);
+    const retryPrompt = `${prompt}
+
+RETRY. Your previous attempt contained these price levels, which do not exist in the data you were given: ${check.offenders.join(", ")}. You invented them. Rewrite the post using ONLY the price levels listed above, and do not introduce any dollar figure that was not given to you.`;
+    const retryText = await runModel(retryPrompt);
+    const recheck = validatePostNumbers(retryText, ctx, grade.levels);
+    if (recheck.ok) {
+      text = retryText;
+    } else {
+      console.warn(`[validate] ❌ Retry still contained invented levels: ${recheck.offenders.join(", ")}. Using the cleaner of the two.`);
+      text = recheck.offenders.length < check.offenders.length ? retryText : text;
     }
-    text = await generateWithGemini(prompt, key, options.model);
   }
 
   // If caller expects a simple string, return text with metadata attached
@@ -652,6 +829,10 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
   result.formatType = formatType;
   result.imageUrl = imageUrl;
   result.images = imageUrl ? [imageUrl] : [];
+  result.grade = grade;
+  result.verdict = grade.verdict;
+  // Only formats that actually publish levels get logged as a call to be graded later.
+  result.levels = formatType === "EVIDENCE_SIGNAL" ? grade.levels : null;
   return result;
 }
 
@@ -691,7 +872,35 @@ export async function publishToSquare(content, apiKey, options = {}) {
     return ""; // remove excess hashtags cleanly
   });
 
-  // 3. Remove dashes while strictly preserving line breaks and clean paragraph spacing
+  // 3. Strip outcome promises. The prompts forbid these, but a model under a hype
+  //    prior will still occasionally emit one, and a single "guaranteed 100x" undoes
+  //    weeks of building credibility. Cheaper to catch it here than to trust the LLM.
+  const PROMISE_PATTERNS = [
+    [/\bguaranteed?\b/gi, "likely"],
+    [/\beasy money\b/gi, "a setup"],
+    [/\bfree money\b/gi, "a setup"],
+    [/\bwill (definitely |certainly |100% )?(pump|moon|explode|fly|skyrocket)\b/gi, "could move"],
+    [/\b(100x|50x|10x)\b/gi, "a large move"],
+    [/\bcan'?t lose\b/gi, "has a defined risk"],
+    [/\bsure thing\b/gi, "a setup"],
+    [/\bno risk\b/gi, "defined risk"],
+    [/\brisk ?free\b/gi, "defined risk"],
+    [/\bnext (bitcoin|ethereum|solana)\b/gi, "a high beta altcoin"],
+    [/\ball ?in\b/gi, "sized carefully"],
+  ];
+  for (const [pattern, replacement] of PROMISE_PATTERNS) {
+    if (pattern.test(sanitized)) {
+      console.warn(`[publish] ⚠️ Stripped promise language matching ${pattern}`);
+      sanitized = sanitized.replace(pattern, replacement);
+    }
+  }
+
+  // 4. Guarantee the risk disclosure is present even if the model dropped it.
+  if (!/not financial advice|nfa\b|dyor/i.test(sanitized)) {
+    sanitized += "\n\nNot financial advice. My levels, my risk.";
+  }
+
+  // 5. Remove dashes while strictly preserving line breaks and clean paragraph spacing
   sanitized = sanitized
     .replace(/--+/g, " ")
     .replace(/[—–]/g, " ")

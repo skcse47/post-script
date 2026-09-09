@@ -22,6 +22,15 @@ import {
   publishToSquare,
   formatPrice,
 } from "./topGainersBot.js";
+import { buildMarketContext, gradeSetup } from "./marketContext.js";
+import {
+  TRADE_CALLS_SCHEMA,
+  recordCall,
+  resolveOpenCalls,
+  getTrackRecord,
+  getRecentCloses,
+  buildTrackRecordPost,
+} from "./trackRecord.js";
 
 // ─── Robust .env loader ──────────────────────────────────────────────────────
 
@@ -39,12 +48,18 @@ function loadDotEnv() {
       const key = trimmed.slice(0, eqIdx).trim();
       let val = trimmed.slice(eqIdx + 1).trim();
       val = val.replace(/^["'](.*)["']$/, "$1").trim();
-      process.env[key] = val;
+      // Do not clobber variables already set in the environment. Overwriting them
+      // meant `DRY_RUN=1 node src/standaloneGainers.js` silently did nothing and the
+      // bot published for real, which is a bad way to find out.
+      if (process.env[key] === undefined) process.env[key] = val;
     }
   } catch (err) {}
 }
 
 loadDotEnv();
+
+// DRY_RUN=1 generates and logs posts without publishing any of them.
+const DRY_RUN = /^(1|true|yes)$/i.test(String(process.env.DRY_RUN || ""));
 
 const BINANCE_SQUARE_API_KEY = process.env.BINANCE_SQUARE_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -100,7 +115,7 @@ db.exec(`
     priority_score REAL DEFAULT 0,
     last_posted_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
-`);
+` + TRADE_CALLS_SCHEMA);
 
 // Safe column additions for existing databases
 try { db.exec("ALTER TABLE post_history ADD COLUMN category TEXT DEFAULT 'gainer'"); } catch (e) {}
@@ -172,10 +187,85 @@ function getHighPriorityCoins(limit = 5) {
 }
 
 /**
+ * Whether this run is allowed to publish. Single gate so DRY_RUN cannot be
+ * accidentally bypassed by one of the call sites.
+ */
+function canPublish() {
+  if (DRY_RUN) return false;
+  return Boolean(BINANCE_SQUARE_API_KEY) && BINANCE_SQUARE_API_KEY !== "your_binance_square_api_key_here";
+}
+
+/**
  * Check if a coin is currently trending (appeared in hot-list recently)
  */
 function isCoinTrending(baseAsset, trendingCoins = []) {
   return trendingCoins.some(c => c.toUpperCase() === baseAsset.toUpperCase());
+}
+
+/**
+ * Coins posted about within the cooldown window.
+ *
+ * Posting the same ticker three times in an hour is what made the feed look
+ * automated. Readers who see $ABC from you twice before lunch stop reading the
+ * third one, and the Square feed itself deprioritises near duplicate content from
+ * one author.
+ */
+function recentlyPostedAssets(hours = 6) {
+  return new Set(
+    db
+      .prepare(
+        `SELECT DISTINCT base_asset FROM post_history
+         WHERE base_asset != '' AND created_at > datetime('now', ?)`
+      )
+      .all(`-${hours} hours`)
+      .map((r) => r.base_asset)
+  );
+}
+
+/** Posts published in the last N hours, used to space out the recap post. */
+function countRecentFormat(formatType, hours) {
+  return db
+    .prepare(
+      `SELECT COUNT(*) c FROM post_history
+       WHERE format_type = ? AND created_at > datetime('now', ?)`
+    )
+    .get(formatType, `-${hours} hours`).c;
+}
+
+/**
+ * Publish the honest track record recap.
+ *
+ * Returns false when there is not enough settled history to be worth posting. That
+ * restraint is the point: a "results" post covering four trades is not evidence, and
+ * padding it out is the same dishonesty the old TARGET_HIT_CONGRATS format committed.
+ */
+async function tryPublishTrackRecord() {
+  if (countRecentFormat("TRACK_RECORD", 20) > 0) return false;
+
+  const stats = getTrackRecord(db, { days: 7, minCalls: 8 });
+  if (!stats) {
+    console.log("[track] Not enough settled calls yet for a recap post. Skipping.");
+    return false;
+  }
+
+  const text = buildTrackRecordPost(stats, getRecentCloses(db, 6));
+  if (!text) return false;
+
+  console.log(`\n📝 ─── GENERATED POST [TRACK_RECORD] ───\n`);
+  console.log(text);
+  console.log(`\n─────────────────────────────────\n`);
+
+  if (DRY_RUN) {
+    console.log(`[track] 🧪 DRY_RUN is set. Recap not published and not recorded.`);
+    return true;
+  }
+
+  if (canPublish()) {
+    await publishToSquare({ text, images: [] }, BINANCE_SQUARE_API_KEY);
+  }
+  recordPost("TRACK_RECORD", "recap", 0, stats.totalR, text, "", "TRACK_RECORD", false);
+  console.log(`[track] ✅ Published ${stats.days} day recap: ${stats.wins}W / ${stats.stopped}L, net ${stats.totalR.toFixed(1)}R`);
+  return true;
 }
 
 // ─── Main Execution Pipeline ─────────────────────────────────────────────────
@@ -233,18 +323,37 @@ export async function executeRoundRobinCycle() {
       console.log(`   ${i + 1}. $${g.baseAsset.padEnd(8)} (+${g.priceChangePercent.toFixed(2)}%) at $${formatPrice(g.lastPrice)}${isTrend ? ' 🔥 TRENDING' : ''}`);
     });
 
-    // 4. Select coin: boost priority coins that are also in top gainers
+    // 4. Settle any open calls against real candles before doing anything else, so
+    //    the recap post below can never be built from unsettled or invented results.
+    try {
+      const { checked, settled } = await resolveOpenCalls(db);
+      if (checked > 0) console.log(`[track] Checked ${checked} open calls, settled ${settled}.`);
+    } catch (err) {
+      console.warn(`[track] Could not resolve open calls: ${err.message}`);
+    }
+
+    // 5. Roughly once a day, post the real track record instead of another setup.
+    //    Receipts convert far better than another buy call, but only real ones.
+    if (Math.random() < 0.12 && (await tryPublishTrackRecord())) {
+      return;
+    }
+
+    // 6. Select a coin, skipping anything already posted about recently.
+    const cooldown = recentlyPostedAssets(Number(process.env.COIN_COOLDOWN_HOURS || 6));
+    const candidates = movers.queue.filter((c) => !cooldown.has(c.baseAsset));
+    const pool = candidates.length > 0 ? candidates : movers.queue;
+    if (candidates.length === 0) {
+      console.log("[queue] Every candidate is inside its cooldown window, reusing the full queue.");
+    }
+
     let currentIndex = Number(getState("rotation_index") ?? 0);
     if (isNaN(currentIndex) || currentIndex < 0) currentIndex = 0;
+    const targetIndex = currentIndex % pool.length;
+    let currentCoin = pool[targetIndex];
 
-    let targetIndex = currentIndex % top3.length;
-    let currentCoin = top3[targetIndex];
-
-    // If a high-priority coin is in top3, prioritize it (50% chance to override rotation)
+    // If a high-priority coin is also in the eligible pool, prefer it.
     if (priorityCoins.length > 0 && Math.random() < 0.5) {
-      const priorityMatch = top3.find(g => 
-        priorityCoins.some(p => p.base_asset === g.baseAsset)
-      );
+      const priorityMatch = pool.find((g) => priorityCoins.some((p) => p.base_asset === g.baseAsset));
       if (priorityMatch) {
         currentCoin = priorityMatch;
         console.log(`[priority] ⭐ Boosted $${currentCoin.baseAsset} from priority list (trending overlap engagement)`);
@@ -254,36 +363,73 @@ export async function executeRoundRobinCycle() {
     const coinIsTrending = isCoinTrending(currentCoin.baseAsset, trendingCoins);
     console.log(`\n🎯 [${startTime}] Selected: $${currentCoin.baseAsset} (+${currentCoin.priceChangePercent.toFixed(1)}%) at $${formatPrice(currentCoin.lastPrice)}${coinIsTrending ? ' [TRENDING 🔥]' : ''}`);
 
-    // Generate trade setup via LLM
-    console.log(`[ai] Generating post setup via ${LLM_PROVIDER.toUpperCase()}...`);
+    // 7. Grade the chart. The verdict decides which kind of post gets written.
+    const marketContext = await buildMarketContext(currentCoin);
+    const grade = gradeSetup(marketContext);
+    grade.ctx = marketContext;
+    console.log(`[grade] $${currentCoin.baseAsset} => ${grade.verdict} (score ${grade.score})`);
+    grade.reasons.forEach((r) => console.log(`   + ${r}`));
+    grade.warnings.forEach((r) => console.log(`   - ${r}`));
+
+    console.log(`[ai] Generating post via ${LLM_PROVIDER.toUpperCase()}...`);
     const postContent = await generateTraderPost(currentCoin, movers.queue, {
       provider: LLM_PROVIDER,
       geminiKey: GEMINI_API_KEY,
       openrouterKey: OPENROUTER_API_KEY,
       model: LLM_MODEL,
       trendingTopic: trendingTopic,
+      marketContext,
+      grade,
     });
 
-    const formatType = postContent.formatType || "TRADE_SIGNAL";
+    const formatType = postContent.formatType || "EVIDENCE_SIGNAL";
 
     console.log(`\n📝 ─── GENERATED POST [${formatType}] ───\n`);
     console.log(postContent.text || postContent);
     console.log(`\n─────────────────────────────────\n`);
 
     // Publish to Binance Square
-    if (BINANCE_SQUARE_API_KEY && BINANCE_SQUARE_API_KEY !== "your_binance_square_api_key_here") {
+    if (canPublish()) {
       await publishToSquare(postContent, BINANCE_SQUARE_API_KEY);
-      recordPost(currentCoin.symbol, currentCoin.category, currentCoin.lastPrice, currentCoin.priceChangePercent, postContent.text || postContent, currentCoin.baseAsset, formatType, coinIsTrending);
-      console.log(`[cycle] ✅ Post published and recorded in database.`);
+      console.log(`[cycle] ✅ Post published.`);
+    } else if (DRY_RUN) {
+      console.log(`[publish] 🧪 DRY_RUN is set. Nothing was published.`);
     } else {
       console.log(`[publish] ⚠️ BINANCE_SQUARE_API_KEY is not configured. Post generated successfully & logged.`);
-      recordPost(currentCoin.symbol, currentCoin.category, currentCoin.lastPrice, currentCoin.priceChangePercent, postContent.text || postContent, currentCoin.baseAsset, formatType, coinIsTrending);
     }
 
-    // Advance rotation index for next 15-minute cycle (0 -> 1 -> 2 -> 0)
-    const nextIndex = (targetIndex + 1) % top3.length;
+    // A dry run must not touch history. Recording an unpublished post would poison
+    // the coin cooldown and, worse, feed a call into the track record that nobody
+    // ever saw.
+    if (!DRY_RUN) {
+      recordPost(
+        currentCoin.symbol,
+        currentCoin.category,
+        currentCoin.lastPrice,
+        currentCoin.priceChangePercent,
+        postContent.text || postContent,
+        currentCoin.baseAsset,
+        formatType,
+        coinIsTrending
+      );
+    }
+
+    // 8. If this post published actual levels, log it as a call so it gets graded
+    //    later whether it works or not. This is what makes the recap post real.
+    if (postContent.levels?.stop && !DRY_RUN) {
+      const callId = recordCall(db, {
+        symbol: currentCoin.symbol,
+        baseAsset: currentCoin.baseAsset,
+        direction: grade.direction,
+        verdict: grade.verdict,
+        levels: postContent.levels,
+      });
+      if (callId) console.log(`[track] Logged call #${callId} on $${currentCoin.baseAsset}, it will be graded against real candles.`);
+    }
+
+    const nextIndex = (targetIndex + 1) % pool.length;
     setState("rotation_index", nextIndex);
-    console.log(`[queue] Next run in 15 minutes will target Top #${nextIndex + 1} Gainer: $${top3[nextIndex].baseAsset}`);
+    console.log(`[queue] Next target: $${pool[nextIndex].baseAsset}`);
 
   } catch (err) {
     console.error(`[cycle] ❌ Error in cycle: ${err.message}`);
@@ -294,28 +440,41 @@ export async function executeRoundRobinCycle() {
 
 // ─── Scheduler ───────────────────────────────────────────────────────────────
 
+// Posting cadence.
+//
+// The old default was every 15 minutes, which is 96 posts a day from one account.
+// Square's feed deprioritises high frequency near duplicate posting from a single
+// author, and readers who see you four times an hour mute you. Fewer, better posts
+// get more total reach than more posts. 45 minutes is the new default; override with
+// POST_INTERVAL_MINUTES if you want to tune it.
+const POST_INTERVAL_MINUTES = Math.max(5, Number(process.env.POST_INTERVAL_MINUTES || 45));
+const CRON_EXPR =
+  POST_INTERVAL_MINUTES >= 60
+    ? `0 */${Math.round(POST_INTERVAL_MINUTES / 60)} * * *`
+    : `*/${POST_INTERVAL_MINUTES} * * * *`;
+
 console.log("=========================================================");
-console.log("⚡ Binance Square Top Gainers & Losers Round-Robin Bot");
-console.log("⏱️  Cron Schedule: Every 15 minutes (*/15 * * * *)");
-console.log("🔄 Queue Cycle: Diverse Altcoins + Macro/Gov/War News");
+console.log("⚡ Binance Square Evidence Based Signal Bot");
+console.log(`⏱️  Cron Schedule: every ${POST_INTERVAL_MINUTES} minutes (${CRON_EXPR})`);
+if (DRY_RUN) console.log("🧪 DRY_RUN is set. Posts will be generated and logged but NOT published.");
+console.log("🧭 Chart grade decides the format: TRADE, WATCH or NO_TRADE");
+console.log("📊 Calls are logged and graded against real candles");
 console.log("📁 SQLite DB: " + DB_PATH);
 console.log("=========================================================\n");
 
-// Check if a post was published very recently (< 12 minutes ago)
 const lastPostTime = getLastPostTime();
 const elapsedMinutes = (Date.now() - lastPostTime) / (60 * 1000);
+const guardMinutes = POST_INTERVAL_MINUTES * 0.8;
 
-if (lastPostTime > 0 && elapsedMinutes < 12) {
-  const waitMins = Math.ceil(15 - elapsedMinutes);
+if (lastPostTime > 0 && elapsedMinutes < guardMinutes) {
+  const waitMins = Math.ceil(POST_INTERVAL_MINUTES - elapsedMinutes);
   console.log(`[startup] ⏳ Last post was published ${elapsedMinutes.toFixed(1)} mins ago.`);
-  console.log(`[startup] Waiting for next scheduled 15-minute cron interval (~${waitMins} min) to prevent duplicate rapid posting.\n`);
+  console.log(`[startup] Waiting ~${waitMins} min for the next scheduled interval to prevent duplicate rapid posting.\n`);
 } else {
-  // Otherwise run initial cycle on launch
   executeRoundRobinCycle();
 }
 
-// Schedule to run exactly every 15 minutes (:00, :15, :30, :45)
-cron.schedule("*/15 * * * *", () => {
+cron.schedule(CRON_EXPR, () => {
   executeRoundRobinCycle();
 });
 
