@@ -12,17 +12,33 @@ drives reach on Square. That document is the actual point of this repo.
 ## How a cycle works
 
 ```
-1. Fetch live 24h tickers, filter to liquid USDT altcoins
-2. Settle any open calls against real candles (wins and losses both)
-3. ~12% of the time: publish the honest track record recap instead
-4. Pick a coin, skipping anything inside its cooldown window
-5. Pull 1h + 15m klines, compute ATR, RSI, volume ratio, swing structure
-6. Grade the setup   -> TRADE | WATCH | NO_TRADE
-7. The verdict picks the format, the LLM writes it from measured numbers only
-8. Validate every price in the output, retry once if any were invented
-9. Strip promise language, guarantee disclosure, publish
-10. If levels were published, log the call so it gets graded later
+1. Fetch live 24h tickers; gainers with $5M+ volume lead the queue
+2. Fetch Square's hot hashtags and the coins they name
+3. Settle any open calls against real candles (wins and losses both)
+4. If a call just hit a target or its stop: publish its CALL_UPDATE instead
+5. ~12% of the time: publish the honest track record recap instead
+6. Pick a coin, skipping cooldowns; half the time prefer one trending on Square
+7. Pull 1h + 15m klines, compute ATR, RSI, volume ratio, swing structure
+8. Grade the setup   -> TRADE | WATCH | NO_TRADE
+9. The verdict picks the format, the LLM writes it from measured numbers only
+10. Review the draft: invented prices, cut off text, copied instruction labels.
+    Retry once; never publish a post that still fails
+11. finalizePost: cashtag in the first line plus a "tap $COIN" line, data
+    timestamp, 7 day record (when there are 5+ settled calls), chosen hashtags
+12. Strip promise language, publish, store the post link
+13. If levels were published, log the call so it gets graded and followed up
 ```
+
+### What the post text is built for
+
+- **The first line.** Square shows about two lines before "see more". Every hook
+  carries the cashtag, one real number, and a reason to keep reading.
+- **Cashtag clicks.** `$COIN` sits in the hook and again in a line inviting the
+  reader to tap it and check the chart. Prices never use up Square's 2 cashtag
+  slots, and the coin the post is about always keeps its link.
+- **Hashtags.** Three at most: a hot Square hashtag only when it names this coin,
+  then `#COIN`, then a format tag. The model never writes them.
+- **Comments.** Every post ends on a question that takes one word to answer.
 
 ## Post formats
 
@@ -32,8 +48,9 @@ drives reach on Square. That document is the actual point of this repo.
 | `NO_TRADE_CALL` | NO_TRADE | Publicly passes on the coin and says which number stopped it |
 | `LEVEL_ALERT` | any | One level, what a break means, what a failure means. Short |
 | `TEACH` | any | One lesson worked through on the live chart |
-| `TRENDING_TOPIC` | any | A real position on a trending hashtag, including what would prove it wrong |
-| `QUICK_TAKE` | any | Under 220 chars, built on one verifiable number |
+| `TRENDING_TOPIC` | any | A real position on a trending hashtag, including what would prove it wrong. Cashtags the coin the hashtag names; topics with no coin are used about a third of the time |
+| `QUICK_TAKE` | any | Under 260 chars, built on one verifiable number |
+| `CALL_UPDATE` | a call resolves | TP hit or stop out, with the original levels and a link to the original post. Assembled in code, at most one every 3 hours |
 | `TRACK_RECORD` | ~daily | Settled results from the database, losses included. Assembled in code, not by the LLM |
 
 ## Quick start
@@ -73,9 +90,37 @@ DRY_RUN=1 npm start
 |---|---|---|
 | `POST_INTERVAL_MINUTES` | 45 | Minutes between posts |
 | `COIN_COOLDOWN_HOURS` | 6 | Before the same ticker can repeat |
-| `LLM_PROVIDER` | openrouter | `openrouter` or `gemini` |
-| `LLM_MODEL` | qwen3-next-80b | Any model your provider supports |
+| `PEAK_WINDOW_IST` | 05:00-09:00 | Best reach window. Inside it: shorter spacing, the strongest chart from a graded shortlist, written as a signal. `off` disables |
+| `PEAK_POST_INTERVAL_MINUTES` | 30 | Spacing inside the peak window. The workflow cron adds :30 runs to match |
+| `LLM_PROVIDER` | gemini | `gemini` or `openrouter` |
+| `LLM_MODEL` | gemini-flash-lite-latest | See the quota note below before changing this |
 | `DRY_RUN` | unset | `DRY_RUN=1` generates and logs posts but publishes nothing and writes nothing to the database |
+
+## Gemini free tier quotas
+
+Gemini's free tier caps requests **per day, per model**. The flagship flash models
+(`gemini-3.6-flash`, `gemini-3.8-flash`) get **20 a day**, which an hourly bot
+exhausts before lunch and then fails every cycle with a 429.
+
+Use the **lite** tier. Measured on a live key:
+
+| | Flagship flash | Flash lite |
+|---|---|---|
+| Free requests/day | 20 | Far higher |
+| Thinking tokens per call | ~2000 | 0 |
+| Post quality for this job | Good | Just as good |
+
+The flagship models are reasoning models: they spend roughly 2000 output tokens on
+internal thinking before writing a word, which is what caused truncated posts at the
+old token ceiling. The lite models report `thoughts=0` and answer directly.
+
+Because the cap is per model, the candidate list in `topGainersBot.js` is a real
+budget multiplier, not just a retry chain: each entry has its own daily allowance.
+When they all fail, `discoverGeminiModel()` asks the API what else the key can use
+and prefers lite.
+
+If you would rather not think about quotas, put $5 of credit on OpenRouter and set
+`LLM_PROVIDER=openrouter`.
 
 ## Deploying free
 

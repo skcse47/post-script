@@ -37,17 +37,26 @@ export const TRADE_CALLS_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_trade_calls_status ON trade_calls(status);
 `;
 
+/** Columns added after the table first shipped. Safe to run on every start. */
+export function migrateTradeCalls(db) {
+  for (const col of ["share_link TEXT", "update_posted INTEGER DEFAULT 0"]) {
+    try {
+      db.exec(`ALTER TABLE trade_calls ADD COLUMN ${col}`);
+    } catch {}
+  }
+}
+
 /**
  * Record a signal at the moment it is posted, so it can be graded honestly later.
  */
-export function recordCall(db, { symbol, baseAsset, direction, verdict, levels }) {
+export function recordCall(db, { symbol, baseAsset, direction, verdict, levels, shareLink = null }) {
   if (!levels || !levels.stop || !levels.targets || levels.targets.length < 3) return null;
   const entry = (levels.entryLow + levels.entryHigh) / 2;
   const info = db
     .prepare(
       `INSERT INTO trade_calls
-       (symbol, base_asset, direction, verdict, entry, stop, tp1, tp2, tp3, risk_pct, called_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (symbol, base_asset, direction, verdict, entry, stop, tp1, tp2, tp3, risk_pct, called_at, share_link)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       symbol,
@@ -60,7 +69,8 @@ export function recordCall(db, { symbol, baseAsset, direction, verdict, levels }
       levels.targets[1],
       levels.targets[2],
       levels.riskPct,
-      Date.now()
+      Date.now(),
+      shareLink
     );
   return info.lastInsertRowid;
 }
@@ -89,6 +99,8 @@ export async function resolveOpenCalls(db, { maxAgeHours = 48 } = {}) {
       let status = null;
       let resultR = null;
       let price = null;
+      // When the deciding candle closed, so the update post can say when it happened.
+      let hitAt = null;
 
       const risk = call.entry - call.stop;
       const rOf = (target) => (risk > 0 ? (target - call.entry) / risk : 0);
@@ -106,6 +118,7 @@ export async function resolveOpenCalls(db, { maxAgeHours = 48 } = {}) {
             status = "STOPPED";
             resultR = -1;
             price = call.stop;
+            hitAt = c.closeTime;
           }
           break;
         }
@@ -114,6 +127,7 @@ export async function resolveOpenCalls(db, { maxAgeHours = 48 } = {}) {
           status = "TP3";
           resultR = rOf(call.tp3);
           price = call.tp3;
+          hitAt = c.closeTime;
           break;
         }
         if (c.high >= call.tp2 && bestTier < 2) {
@@ -121,11 +135,13 @@ export async function resolveOpenCalls(db, { maxAgeHours = 48 } = {}) {
           status = "TP2";
           resultR = rOf(call.tp2);
           price = call.tp2;
+          hitAt = c.closeTime;
         } else if (c.high >= call.tp1 && bestTier < 1) {
           bestTier = 1;
           status = "TP1";
           resultR = rOf(call.tp1);
           price = call.tp1;
+          hitAt = c.closeTime;
         }
       }
 
@@ -140,7 +156,7 @@ export async function resolveOpenCalls(db, { maxAgeHours = 48 } = {}) {
       if (status) {
         db.prepare(
           "UPDATE trade_calls SET status = ?, result_r = ?, resolved_at = ?, resolved_price = ? WHERE id = ?"
-        ).run(status, resultR, Date.now(), price, call.id);
+        ).run(status, resultR, Math.min(hitAt ?? Date.now(), Date.now()), price, call.id);
         settled++;
       }
     } catch (err) {
@@ -201,12 +217,14 @@ export function buildTrackRecordPost(stats, recentRows = []) {
   const sign = (r) => (r >= 0 ? `+${r.toFixed(1)}R` : `${r.toFixed(1)}R`);
   const lines = [];
 
-  lines.push(`My last ${stats.days} days, every call, wins and losses 📊`);
+  // Hook leads with the result, good or bad. A net negative week posted honestly
+  // earns more trust than a green one, so it gets the same first line treatment.
+  lines.push(`${stats.total} calls in ${stats.days} days. Net ${sign(stats.totalR)}. Every loss included 📊`);
   lines.push("");
   lines.push(
-    `${stats.total} calls closed. ${stats.wins} hit a target, ${stats.stopped} stopped out${stats.expired ? `, ${stats.expired} closed flat` : ""}.`
+    `${stats.wins} hit a target, ${stats.stopped} stopped out${stats.expired ? `, ${stats.expired} closed flat` : ""}.`
   );
-  lines.push(`Win rate ${stats.winRate.toFixed(0)}%. Net ${sign(stats.totalR)} risking 1R per idea.`);
+  lines.push(`Win rate ${stats.winRate.toFixed(0)}%, risking 1R per idea.`);
   lines.push("");
 
   if (recentRows.length > 0) {
@@ -219,18 +237,121 @@ export function buildTrackRecordPost(stats, recentRows = []) {
     lines.push("");
   }
 
-  lines.push(`Best: ${stats.best.asset} ${sign(stats.best.r)}. Worst: ${stats.worst.asset} ${sign(stats.worst.r)}.`);
+  // Cashtags on best and worst only: Square links two coins per post.
+  const sameCoin = stats.best.asset === stats.worst.asset;
+  lines.push(
+    `Best: $${stats.best.asset} ${sign(stats.best.r)}. Worst: ${sameCoin ? "" : "$"}${stats.worst.asset} ${sign(stats.worst.r)}.`
+  );
   if (stats.open > 0) lines.push(`${stats.open} still open, I will post those results too.`);
   lines.push("");
   lines.push(
     `The losers are in there on purpose. Anyone showing you only green screenshots is selling you something.`
   );
   lines.push("");
-  lines.push("Which of these do you want me to break down on the chart? 👇");
+  lines.push("Which one do you want broken down on the chart? 👇");
   lines.push("");
   lines.push("Not financial advice. I post my own levels and my own mistakes.");
+  lines.push("");
   lines.push("#TradingJournal #CryptoTrading");
 
+  return lines.join("\n");
+}
+
+/**
+ * Oldest call that hit a target or its stop in the last `maxAgeHours` and has not
+ * had its follow up posted. Expired calls are skipped: "nothing happened" is not
+ * worth a post. The age window stops a new install announcing week old results.
+ */
+export function getPendingCallUpdate(db, { maxAgeHours = 24 } = {}) {
+  return (
+    db
+      .prepare(
+        `SELECT * FROM trade_calls
+         WHERE status IN ('TP1', 'TP2', 'TP3', 'STOPPED')
+           AND COALESCE(update_posted, 0) = 0
+           AND resolved_at >= ?
+         ORDER BY resolved_at ASC LIMIT 1`
+      )
+      .get(Date.now() - maxAgeHours * 3_600_000) || null
+  );
+}
+
+export function markCallUpdatePosted(db, id) {
+  db.prepare("UPDATE trade_calls SET update_posted = 1 WHERE id = ?").run(id);
+}
+
+function hhmmUtc(ms) {
+  const d = new Date(ms);
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
+}
+
+function agoText(fromMs, toMs) {
+  const h = (toMs - fromMs) / 3_600_000;
+  return h < 1 ? `${Math.max(1, Math.round(h * 60))} min` : `${Math.round(h)}h`;
+}
+
+/**
+ * Follow up on a call that just resolved, win or loss.
+ *
+ * This is the post that makes the rest of the feed believable: a call made in public,
+ * with its levels, graded in public against what the candles actually did, linking
+ * back to the unedited original. Built in code from the settled row so the model
+ * cannot round a loss into a win.
+ */
+export function buildCallUpdatePost(call) {
+  if (!call) return null;
+  const S = `$${call.base_asset}`;
+  const r = call.result_r || 0;
+  const rTxt = `${r >= 0 ? "+" : ""}${r.toFixed(1)}R`;
+  const took = agoText(call.called_at, call.resolved_at);
+  const at = hhmmUtc(call.resolved_at);
+  const original = call.share_link
+    ? `Original post, unedited: ${call.share_link}`
+    : `The original post is on my profile, timestamped and unedited.`;
+  const lines = [];
+
+  if (String(call.status).startsWith("TP")) {
+    const hitPrice = call.status === "TP3" ? call.tp3 : call.status === "TP2" ? call.tp2 : call.tp1;
+    lines.push(`${S} ${call.status} hit ✅ ${rTxt}, ${took} after I posted it.`);
+    lines.push("");
+    lines.push(`Entry $${fmtPx(call.entry)}. Stop $${fmtPx(call.stop)}.`);
+    lines.push(`${call.status} at $${fmtPx(hitPrice)} traded at ${at}.`);
+    lines.push("");
+    if (call.status === "TP1") {
+      lines.push(`Next level on the plan was TP2 at $${fmtPx(call.tp2)}.`);
+      lines.push(`If you are still in, a stop at entry makes the rest a free ride.`);
+    } else if (call.status === "TP2") {
+      lines.push(`TP3 at $${fmtPx(call.tp3)} is the last level on the plan.`);
+      lines.push(`Stop at TP1 or entry from here, no reason to give it back.`);
+    } else {
+      lines.push(`All three targets done. That is the whole plan, nothing left to manage.`);
+    }
+    lines.push("");
+    lines.push(original);
+    lines.push("");
+    lines.push(`I post the stop outs exactly like this. Tap ${S} and check the candles yourself.`);
+    lines.push("");
+    lines.push(`Did you catch this one, or wait for a better entry?`);
+  } else {
+    lines.push(`${S} stopped out ❌ ${rTxt}. Posting it like I post the wins.`);
+    lines.push("");
+    lines.push(`Entry $${fmtPx(call.entry)}. Stop $${fmtPx(call.stop)}.`);
+    lines.push(`Price traded through the stop at ${at}, ${took} after the call. The idea is dead.`);
+    lines.push("");
+    lines.push(`No moving the stop. No averaging down.`);
+    lines.push(`It was sized so this costs 1R and nothing more. That is the whole job of a stop.`);
+    lines.push("");
+    lines.push(original);
+    lines.push("");
+    lines.push(`Tap ${S} to see exactly where it broke.`);
+    lines.push("");
+    lines.push(`After a stop out, do you re-enter or leave the coin alone for the day?`);
+  }
+
+  lines.push("");
+  lines.push("Not financial advice.");
+  lines.push("");
+  lines.push(`#${call.base_asset} #TradingJournal`);
   return lines.join("\n");
 }
 

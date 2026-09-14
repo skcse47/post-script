@@ -17,6 +17,11 @@ on:
     # UTC). Whatever you pick must be further apart than POST_INTERVAL_MINUTES or
     # the bot's own spacing guard will skip the extra runs.
     - cron: "0 * * * *"
+    # Peak window, 05:00 to 09:00 IST (23:30 to 03:30 UTC). The hourly line above
+    # already covers :00, these add the :30 runs so the window gets a post every 30
+    # minutes: 05:00, 05:30 ... 08:30 IST. Keep PEAK_WINDOW_IST in step if you move it.
+    - cron: "30 23 * * *"
+    - cron: "30 0-2 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -73,10 +78,15 @@ jobs:
           BINANCE_SQUARE_API_KEY: ${{ secrets.BINANCE_SQUARE_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
-          LLM_MODEL: ${{ vars.LLM_MODEL || 'qwen/qwen3-next-80b-a3b-instruct' }}
+          # Gemini by default. Its free tier caps requests per day PER MODEL, so the
+          # lite tier is the one with enough headroom for a bot on a schedule; the
+          # flagship flash models are capped at 20 a day and run out before lunch.
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'gemini' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'gemini-flash-lite-latest' }}
           POST_INTERVAL_MINUTES: ${{ vars.POST_INTERVAL_MINUTES || '45' }}
           COIN_COOLDOWN_HOURS: ${{ vars.COIN_COOLDOWN_HOURS || '6' }}
+          PEAK_WINDOW_IST: ${{ vars.PEAK_WINDOW_IST || '05:00-09:00' }}
+          PEAK_POST_INTERVAL_MINUTES: ${{ vars.PEAK_POST_INTERVAL_MINUTES || '30' }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
           FORCE_POST: ${{ inputs.force && '1' || '' }}
         run: node src/runOnce.js

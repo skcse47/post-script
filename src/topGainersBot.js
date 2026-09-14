@@ -23,16 +23,26 @@ const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 // Candidate models tried in order before falling back to live discovery.
 //
-// This list WILL go stale. As of the last check gemini-2.0-flash, gemini-2.5-flash
-// and gemini-1.5-flash had all been retired and every one of them 404'd, which made
-// the provider look broken when it was only out of date. `discoverGeminiModel()`
-// asks the API what actually exists when these all fail, so a stale entry here
-// costs one wasted request rather than a dead bot.
+// LITE MODELS FIRST, deliberately. Two reasons, both measured against this API:
+//
+// 1. Quota. The free tier caps requests PER DAY PER MODEL, and the flagship flash
+//    models get 20/day, which one hourly bot exhausts before lunch. The lite tier
+//    is far more generous. Because the cap is per model, having several working
+//    entries here multiplies the daily budget rather than just adding a retry.
+// 2. Thinking tokens. gemini-3.x flash models are reasoning models and spend ~2000
+//    output tokens thinking before writing anything. The lite models report
+//    thoughts=0, so the whole budget goes to the post and responses are faster.
+//
+// This list WILL go stale; Google retires models constantly. Every 2.x model here
+// was killed within months. `discoverGeminiModel()` asks the API what actually
+// exists when these all fail, so a stale entry costs one wasted request rather
+// than a dead bot.
 const GEMINI_CANDIDATE_MODELS = [
+  "gemini-flash-lite-latest",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-3.5-flash",
   "gemini-3.6-flash",
-  "gemini-flash-latest",
-  "gemini-2.5-flash",
-  "gemini-2.0-flash",
 ];
 
 // Diverse watchlist of 80+ top traded & trending coins across AI, Layer 1s, Memes, DeFi, and RWA (NO BNB, ETH, XRP, BTC, SOL)
@@ -61,6 +71,10 @@ function shuffleArray(array) {
 const BANNED_BASE_ASSETS = new Set([
   "BNB", "ETH", "XRP", "BTC", "SOL", "USDT", "USDC", "FDUSD", "TUSD", "BUSD", "EUR", "DAI", "WBTC", "SUSD", "UST"
 ]);
+
+// 24h turnover a coin needs to lead the queue. Below this there is rarely anyone on
+// Square reading about it. See getMarketMovers.
+export const AUDIENCE_MIN_VOLUME_USDT = 5_000_000;
 
 const EXCLUDED_SYMBOLS = new Set([
   "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT",
@@ -184,10 +198,17 @@ export async function getMarketMovers(count = 10, minVolumeUSDT = 1_000_000) {
       };
     });
 
-  // Sort real altcoins by 24h percentage gain descending
-  const topAltcoinGainers = [...validPairs]
+  // Sort real altcoins by 24h percentage gain descending.
+  //
+  // Lead with gainers that have real turnover. The raw top of the list is mostly thin
+  // tokens (IOST, LITEB, FF) with nobody reading about them on Square, so the posts
+  // got no views and their cashtags had nobody to click. On a quiet day with fewer
+  // than 3 liquid gainers, fall back to the full list rather than post nothing.
+  const allGainers = [...validPairs]
     .filter((p) => p.priceChangePercent > 3.0)
     .sort((a, b) => b.priceChangePercent - a.priceChangePercent);
+  const liquidGainers = allGainers.filter((p) => p.quoteVolume >= AUDIENCE_MIN_VOLUME_USDT);
+  const topAltcoinGainers = liquidGainers.length >= 3 ? liquidGainers : allGainers;
 
   // Guarantee Top 3 gainers lead the rotation queue
   const top3Gainers = topAltcoinGainers.slice(0, 3);
@@ -206,7 +227,9 @@ export async function getMarketMovers(count = 10, minVolumeUSDT = 1_000_000) {
     gainers: gainers.length > 0 ? gainers : queue, 
     losers, 
     top3: top3Gainers,
-    queue: queue.length > 0 ? queue : validPairs.slice(0, count)
+    queue: queue.length > 0 ? queue : validPairs.slice(0, count),
+    // Every liquid pair, so callers can match coins that are trending on Square.
+    all: validPairs,
   };
 }
 
@@ -259,18 +282,24 @@ export async function getHotTrendingHashtags(limit = 3) {
 /**
  * Build the post prompt.
  *
- * Design notes, because the previous version is why engagement was flat:
+ * What the prompts are optimised for, in order:
  *
- * - Every post was a buy call. A feed that is bullish 100% of the time, every 15
- *   minutes, on whatever is already up the most, is indistinguishable from a pump
- *   account. NO_TRADE_CALL and LEVEL_ALERT exist so the account is seen refusing
- *   trades, which is the single cheapest credibility signal available.
- * - Levels were current price x a fixed multiplier, identical on every coin. Now
- *   they come from `marketContext.gradeSetup` and differ per chart.
- * - Claims were unfalsifiable ("I see buyers stepping in"). Now the model is handed
- *   real measurements and forbidden from inventing any others.
- * - TARGET_HIT_CONGRATS fabricated wins for trades that were never called. Deleted.
- *   Real results come from `trackRecord`, assembled in code, not by a model.
+ * 1. The first line. Square shows two or three lines in the feed before "see more",
+ *    so the hook is the post as far as reach is concerned. Every format gets a hook
+ *    built on the cashtag plus one real number plus a reason to keep reading, and
+ *    the example shapes rotate so the feed does not open the same way every hour.
+ * 2. Cashtag clicks. `$SYMBOL` goes in the hook, again next to the level that
+ *    matters, and in one explicit "tap $SYMBOL and check it yourself" line. A reader
+ *    who is invited to verify the chart is a reader who opens the coin page.
+ *    `finalizePost` enforces this in code in case the model drops it.
+ * 3. Trust. Every number comes from real candles, the post says what would prove it
+ *    wrong, and it never claims a trade that cannot be verified. Measured facts
+ *    written conversationally read as a person; the old report style read as a bot.
+ * 4. Comments. Posts end on a question that takes one word to answer, because a
+ *    question that needs a paragraph gets scrolled past.
+ *
+ * Hashtags and the disclaimer are added in code by `finalizePost`, not by the model,
+ * so they are consistent and capped correctly.
  *
  * Formats:
  *   EVIDENCE_SIGNAL  a setup with real levels, real risk, stated invalidation
@@ -280,60 +309,100 @@ export async function getHotTrendingHashtags(limit = 3) {
  *   TRENDING_TOPIC   an opinion on a trending hashtag with an actual position in it
  *   QUICK_TAKE       short, but built around one verifiable number
  */
-function buildMultiFormatPrompt(coin, formatType = "EVIDENCE_SIGNAL", allMovers = [], trendingTopic = null, grade = null) {
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+/** Two distinct example shapes, so the model has range without a template to copy. */
+function pickTwo(arr) {
+  const shuffled = shuffleArray(arr);
+  return shuffled.slice(0, 2);
+}
+
+function signedPct(n, digits = 0) {
+  if (!Number.isFinite(n)) return "n/a";
+  return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}%`;
+}
+
+function buildMultiFormatPrompt(coin, formatType = "EVIDENCE_SIGNAL", allMovers = [], trendingTopic = null, grade = null, extras = {}) {
   const symbol = coin?.baseAsset || "MARKET";
+  const S = `$${symbol}`;
   const ctx = grade?.ctx || null;
   const levels = grade?.levels || null;
+  const chg = ctx?.changePct ?? coin?.priceChangePercent ?? 0;
+  const upDown = chg >= 0 ? `up ${Math.abs(chg).toFixed(0)}%` : `down ${Math.abs(chg).toFixed(0)}%`;
+  const vol = ctx ? `${ctx.volRatio.toFixed(1)}x` : null;
 
   // Only measurements that came off real candles are ever put in front of the model.
   const evidence = (grade?.reasons || []).map((r) => `- ${r}`).join("\n");
   const risks = (grade?.warnings || []).map((r) => `- ${r}`).join("\n");
 
   const factBlock = ctx
-    ? `VERIFIED MARKET DATA for $${symbol} (every number below is measured from Binance candles, do not alter any of them):
+    ? `VERIFIED MARKET DATA for ${S} (measured from Binance candles, do not alter any of them):
 - Price: $${px(ctx.price)}
-- 24h change: ${ctx.changePct >= 0 ? "+" : ""}${ctx.changePct.toFixed(1)}%
-- 24h range: $${px(ctx.rangeLow)} to $${px(ctx.rangeHigh)}, price is sitting at ${ctx.rangePos.toFixed(0)}% of that range
+- 24h change: ${signedPct(ctx.changePct, 1)}
+- 24h range: $${px(ctx.rangeLow)} to $${px(ctx.rangeHigh)}, price is at ${ctx.rangePos.toFixed(0)}% of that range
 - 7 day high: $${px(ctx.high7d)} (price is ${ctx.pctFrom7dHigh.toFixed(1)}% from it)
 - 1h RSI: ${ctx.rsi1h !== null ? ctx.rsi1h.toFixed(0) : "n/a"}
 - 24h volume: $${fmtCompact(ctx.last24Vol)}, which is ${ctx.volRatio.toFixed(1)}x the 7 day average
-- 1h ATR: ${ctx.atrPct !== null ? ctx.atrPct.toFixed(1) : "n/a"}% of price (this is the normal hourly swing)
-- Last 1h swing low: $${px(ctx.swingLow1h)}   Last 1h swing high: $${px(ctx.swingHigh1h)}`
-    : `MARKET DATA for $${symbol}: price $${px(coin?.lastPrice || 0)}, 24h change ${(coin?.priceChangePercent || 0).toFixed(1)}%.`;
+- 1h ATR: ${ctx.atrPct !== null ? ctx.atrPct.toFixed(1) : "n/a"}% of price (the normal hourly swing)
+- Last 24h swing low: $${px(ctx.swingLow1h)}   Last 24h swing high: $${px(ctx.swingHigh1h)}`
+    : `MARKET DATA for ${S}: price $${px(coin?.lastPrice || 0)}, 24h change ${signedPct(coin?.priceChangePercent || 0, 1)}.`;
 
-  const VOICE = `VOICE AND HONESTY RULES (these override everything else):
-1. You are a systematic trader who publishes levels from a screener. Write in first person.
-2. NEVER claim you already bought, already sold, or already made money. You have no proof of that and readers assume it is a lie. Say what the setup is and what you would do, not what you supposedly did.
-3. NEVER invent a number. Use ONLY the measured values above. If you want to make a point you have no number for, do not make the point.
-4. NEVER promise an outcome. No "guaranteed", no "easy money", no "this WILL pump", no "100x".
-5. No hype punctuation walls. Maximum 4 emojis in the whole post.
-6. Lead with the specific number, not with excitement. "Volume is 3.2x average" beats "MASSIVE VOLUME".
-7. Do not use dashes (-- or em-dashes).
-8. Simple everyday English. Short lines. Mobile readers.
-9. Output ONLY the raw post text, no preamble, no explanation of what you wrote.`;
+  const voiceFor = (tag) => `VOICE AND HONESTY RULES (these override everything else):
+1. You are an experienced trader sharing a chart read with a friend. First person, plain, confident, a little blunt. Sound like a person, never like a report or an AI.
+2. NEVER claim you already bought, sold, or made money. Say what the setup is and what you would do.
+3. NEVER invent a number, news, partnership, whale move, on chain stat or event. Use ONLY the data above. If you have no number for a point, drop the point.
+4. NEVER promise an outcome. No "guaranteed", "easy money", "will pump", "moon", "100x".
+5. ${tag ? `Every time you name the coin write it as ${tag} with the dollar sign. Never write the bare ticker.` : "Do not name any coin ticker."}
+6. Maximum 4 emojis. Only at the START of a line that has text after it (📊 🎯 🛑 ✅ ⚠️ 👀). Never an emoji on a line by itself, never two in a row.
+7. No dashes of any kind: no "--", no em dash, no en dash. Use a full stop or a comma.
+8. Short lines, one idea per line, a blank line between blocks. People read this on a phone.
+9. Do NOT write hashtags and do NOT write a disclaimer. Both are added automatically.
+10. Never copy wording from these instructions, and never write labels like "Hook", "Line 1", "Structure" or "The level".
+11. Output ONLY the finished post. No preamble, no quotes around it, no notes after it.`;
+  const VOICE = voiceFor(S);
+
+  const HOOK_RULE = `THE FIRST LINE IS EVERYTHING. Square shows only the first 2 lines before "see more".
+The first line must: contain ${S}, contain one real number from the data, and give a reason to keep reading (a tension, a contradiction, or a clear opinion). Under 90 characters. No emoji at the start. No "Hey guys", no "Let's talk about".`;
+
+  const CTA_RULE = `Include exactly one line that invites readers to check the chart themselves by tapping ${S}. Write it naturally in your own words, for example "Tap ${S} and look at the last 24 hourly candles, the level is right there." Put it right after you mention the key level.`;
 
   // ---------------------------------------------------------------- NO_TRADE
   if (formatType === "NO_TRADE_CALL") {
-    return `Write a Binance Square post where you publicly PASS on $${symbol} and explain why.
+    const hooks = pickTwo([
+      `${S} is ${upDown} today and I am not touching it. One number is why.`,
+      `Everyone is looking at ${S} right now. I am sitting this one out.`,
+      `${S} looks strong on the surface. The ${ctx?.rsi1h >= 70 ? `RSI at ${ctx.rsi1h.toFixed(0)}` : "volume"} says wait.`,
+      `I almost bought ${S} today. Then I checked the ${vol ? `volume, ${vol} average` : "chart"}.`,
+    ]);
 
-This post exists to show readers you say no. It is the most valuable post type on the account, so do not soften it into a buy call.
+    return `Write a Binance Square post where you publicly PASS on ${S} and explain why.
+
+Saying no in public is what makes readers trust the yes. Do not soften this into a buy call.
 
 ${factBlock}
 
 WHY THIS IS A PASS:
 ${risks || `- The evidence for continuation is not strong enough to justify the risk here.`}
 
-WHAT WOULD CHANGE YOUR MIND (use these exact levels, do not invent your own):
+WHAT WOULD CHANGE YOUR MIND (use these exact levels):
 - An hourly close and hold above $${px(ctx?.swingHigh1h ?? coin?.highPrice)}
-- Or a pullback that holds $${px(ctx?.swingLow1h ?? coin?.lowPrice)} and bounces from it
+- Or a pullback that holds $${px(ctx?.swingLow1h ?? coin?.lowPrice)} and bounces
 
-STRUCTURE TO FOLLOW:
-Line 1: a hook that states the pass plainly. Example shape: "$${symbol} is up ${Math.abs(coin?.priceChangePercent || 0).toFixed(0)}% today and I am not touching it. Here is the number that stopped me."
-Then: the specific measured reason, in 2 or 3 short lines.
-Then: exactly what you need to see before this becomes a trade, with the price level.
-Then: one honest line admitting this could keep running without you, and that missing a move costs nothing while a bad entry costs real money.
-Then: ask readers who ARE in the trade what their invalidation level is. Genuine question, not bait.
-End with: "Not financial advice. My levels, my risk." and the tags #${symbol} #RiskManagement
+${HOOK_RULE}
+Example hook shapes, do not copy them word for word:
+- ${hooks[0]}
+- ${hooks[1]}
+
+FLOW:
+First line: the hook.
+Then 2 or 3 short lines: the single most important measured reason, with its number.
+Then: exactly what you need to see before this becomes a trade, with the price.
+${CTA_RULE}
+Then one honest line: it could keep running without you, and missing a move costs nothing while a bad entry costs money.
+Last line: a question answerable in one word, like "Chasing ${S} here, or waiting for $${px(ctx?.swingLow1h ?? coin?.lowPrice)}?"
 
 ${VOICE}`;
   }
@@ -341,19 +410,33 @@ ${VOICE}`;
   // ------------------------------------------------------------- LEVEL_ALERT
   if (formatType === "LEVEL_ALERT") {
     const key = ctx?.swingHigh1h || coin?.highPrice;
-    return `Write a SHORT Binance Square post (under 400 characters) about one single price level on $${symbol}.
+    const support = ctx?.swingLow1h || coin?.lowPrice;
+    const hooks = pickTwo([
+      `${S} has one level that matters today: $${px(key)}.`,
+      `Set an alert on ${S} at $${px(key)}. Here is why.`,
+      `${S} keeps stalling at $${px(key)}. Something gives soon.`,
+    ]);
+
+    return `Write a SHORT Binance Square post (under 450 characters) about one price level on ${S}.
 
 ${factBlock}
 
-THE LEVEL: $${px(key)}
+The level to write about is $${px(key)}, the highest high of the last 24 hourly candles.
+The support underneath is $${px(support)}, the lowest low of the same window.
 
-STRUCTURE:
-Line 1: name the level and why it matters, in one sentence.
-Line 2: what it means if price closes above it.
-Line 3: what it means if it fails.
-Last line: ask readers which side they are leaning. Tags: #${symbol}
+${HOOK_RULE}
+Example hook shapes, do not copy them word for word:
+- ${hooks[0]}
+- ${hooks[1]}
 
-No entry, no targets, no stop in this post. It is a heads up, not a signal. Keep it under 400 characters total.
+FLOW:
+First line: the hook, naming $${px(key)}.
+Then one line: what an hourly close above it would mean.
+Then one line: what a rejection would mean, and that $${px(support)} is the next level down.
+Then one short line inviting readers to tap ${S} and set an alert there.
+Last line: "Break or reject? 👀" or a similar one word question in your own words.
+
+No entry, no stop, no targets. This is a heads up, not a signal.
 
 ${VOICE}`;
   }
@@ -363,22 +446,26 @@ ${VOICE}`;
     const lessons = [
       {
         topic: "position sizing",
-        angle: `Use $${symbol} as the live example. Its 1h ATR is ${ctx?.atrPct?.toFixed(1) || "high"}% of price, so show the reader how to work out a size where a stop that far away only costs 1% of the account. Do the arithmetic on a $1000 account so it is concrete.`,
+        hook: `${S} moves ${ctx?.atrPct?.toFixed(1) || "a lot"}% an hour. Most people size it like a stablecoin.`,
+        angle: `${S} has a 1h ATR of ${ctx?.atrPct?.toFixed(1) || "n/a"}% of price. Show how to size a position so a stop that far away only costs 1% of the account. Do the arithmetic on a $1000 account so it is concrete.`,
       },
       {
         topic: "why chasing the top gainer usually loses",
-        angle: `$${symbol} is up ${(coin?.priceChangePercent || 0).toFixed(0)}% and sitting at ${ctx?.rangePos?.toFixed(0) || "the top"}% of its 24h range. Explain who is selling to a buyer at this price and what that means for the odds.`,
+        hook: `${S} is ${upDown}. Ask yourself who is selling it to you at this price.`,
+        angle: `${S} is ${upDown} and sitting at ${ctx?.rangePos?.toFixed(0) || "the top"}% of its 24h range. Explain who is selling to a buyer at this price and what that means for the odds.`,
       },
       {
         topic: "reading volume properly",
-        angle: `$${symbol} volume is ${ctx?.volRatio?.toFixed(1) || "elevated"}x its 7 day average. Explain the difference between a move with volume behind it and a move without, and how to check that ratio yourself in 20 seconds.`,
+        hook: `${S} volume is ${vol || "unusual"} its weekly average. Here is why that matters more than price.`,
+        angle: `${S} 24h volume is ${vol || "n/a"} its 7 day average. Explain the difference between a move with volume behind it and a move without, and how to check that ratio yourself in 20 seconds.`,
       },
       {
         topic: "where a stop actually belongs",
-        angle: `Explain that a stop belongs below the level that proves you wrong, not at a round percentage. Use $${symbol}: its last 1h swing low is $${px(ctx?.swingLow1h || 0)}, and its normal hourly swing is ${ctx?.atrPct?.toFixed(1) || "n/a"}%, so a tighter stop than that gets hit by noise alone.`,
+        hook: `Your stop on ${S} is probably in the wrong place. Here is where it belongs.`,
+        angle: `A stop belongs below the level that proves you wrong, not at a round percentage. Use ${S}: its 24h swing low is $${px(ctx?.swingLow1h)}, and its normal hourly swing is ${ctx?.atrPct?.toFixed(1) || "n/a"}%, so a tighter stop than that gets hit by noise alone.`,
       },
     ];
-    const lesson = lessons[Math.floor(Math.random() * lessons.length)];
+    const lesson = pick(lessons);
 
     return `Write a Binance Square post that TEACHES one thing: ${lesson.topic}.
 
@@ -386,13 +473,18 @@ ${factBlock}
 
 THE ANGLE: ${lesson.angle}
 
-STRUCTURE:
-Line 1: a hook that names the mistake most people make. No coin hype.
-Then: teach it in 4 to 6 short lines, using the real $${symbol} numbers as the worked example. Show the actual arithmetic.
-Then: one line on what to do differently on the next trade.
-Then: ask readers what their own rule is for this. Tags: #TradingTips #${symbol}
+${HOOK_RULE}
+Example hook shape, do not copy it word for word:
+- ${lesson.hook}
 
-This post is not a signal. Do not give an entry or a target.
+FLOW:
+First line: the hook, naming the mistake most people make, using ${S} and a real number.
+Then 4 to 6 short lines teaching it with the real ${S} numbers. Show the arithmetic.
+${CTA_RULE}
+Then one line: the rule to use on the next trade.
+Last line: ask readers for their own rule in a way that takes a few words to answer.
+
+This is not a signal. No entry, no target.
 
 ${VOICE}`;
   }
@@ -401,71 +493,256 @@ ${VOICE}`;
   if (formatType === "TRENDING_TOPIC" && trendingTopic) {
     const hashtag = trendingTopic.hashtag || "#Crypto";
     const cleanTopic = hashtag.replace(/^#/, "").replace(/([a-z])([A-Z0-9])/g, "$1 $2");
+    const tc = extras.topicCoin;
+    const T = tc ? `$${tc.baseAsset}` : null;
+    const coinBlock = tc
+      ? `COIN LINKED TO THIS TOPIC: ${T}. Live Binance data: price $${px(tc.lastPrice)}, 24h change ${signedPct(tc.priceChangePercent, 1)}, 24h range $${px(tc.lowPrice)} to $${px(tc.highPrice)}, 24h volume $${fmtCompact(tc.quoteVolume)}.
+Write it as ${T} every time you mention it, and mention it in the first line.`
+      : `There is no coin data for this topic. Do not name any coin price.`;
+
     return `Write a Binance Square post giving your genuine take on the trending topic ${hashtag}.
 
 TOPIC: ${cleanTopic}
-${trendingTopic.viewCount ? `This topic has ${trendingTopic.viewCount.toLocaleString()} views on Binance Square right now.` : ""}
-${trendingTopic.topSnippet ? `Context being discussed: ${trendingTopic.topSnippet}` : ""}
+${trendingTopic.viewCount ? `This topic has ${Number(trendingTopic.viewCount).toLocaleString("en-US")} views on Binance Square right now.` : ""}
+${trendingTopic.topSnippet ? `What people are posting about it: ${trendingTopic.topSnippet}` : ""}
 
-STRUCTURE:
-Line 1: a hook that takes an actual position on the topic. Not "here is what is happening". Something a reader could disagree with.
-Then: 3 or 4 short lines on why you hold that view, and what it changes for a trader specifically.
-Then: state plainly what you are doing about it, including if the answer is nothing.
-Then: name the thing that would prove your view wrong. This is the part that makes people trust you, do not skip it.
-Then: ask readers for the opposite view. Tags: ${hashtag}
+${coinBlock}
 
-IMPORTANT: if you do not have real information about this topic beyond the hashtag itself, write about what the topic trending TELLS you about market attention and positioning, rather than inventing news, numbers, partnerships, or events. Never state a fact you were not given.
+FIRST LINE: take a position a reader could disagree with${T ? `, name ${T}` : ""}, under 90 characters. Not "here is what is happening".
 
-${VOICE}`;
+FLOW:
+First line: the position.
+Then 3 or 4 short lines: why you hold it, and what it changes for a trader specifically.
+Then: what you are doing about it, including if the answer is nothing.
+Then: the specific thing that would prove you wrong. Do not skip this, it is what earns trust.
+${T ? `Then one line inviting readers to tap ${T} and look at the chart before deciding.` : ""}
+Last line: ask for the opposite view in a way that takes one or two words to answer.
+
+If you have no real information beyond the hashtag, write about what the topic trending tells you about attention and positioning. Never state a fact you were not given.
+
+${voiceFor(T)}`;
   }
 
   // -------------------------------------------------------------- QUICK_TAKE
   if (formatType === "QUICK_TAKE") {
-    return `Write a very short Binance Square post about $${symbol}, under 220 characters.
+    return `Write a very short Binance Square post about ${S}, under 260 characters.
 
 ${factBlock}
 
-It must be built around ONE specific measured number from the data above, and it must say something useful. Not "this is pumping". Something like the volume ratio, the RSI reading, the distance from the 7 day high, or where price sits in its range, and what that one number implies.
+Build it on ONE measured number from the data (volume ratio, RSI, distance from the 7 day high, or position in the 24h range) and say what that number implies. Not "this is pumping".
+Start with ${S}. End with a one word question, like "Fade or follow?".
 
-End with a short question. Tag: #${symbol}
-
-Under 220 characters total.
+Under 260 characters total.
 
 ${VOICE}`;
   }
 
   // --------------------------------------------------------- EVIDENCE_SIGNAL
-  const isWatch = grade?.verdict === "WATCH" || grade?.verdict === "WATCH";
+  const isWatch = grade?.verdict === "WATCH";
   const rr = levels?.targetR?.[0] || 1.5;
+  const hooks = pickTwo([
+    `${S} is ${upDown} on ${vol || "rising"} volume, and it is still holding the highs.`,
+    `I only take a trade when I know where I am wrong. On ${S} that is $${px(levels?.stop)}.`,
+    `${S} is giving a clean ${rr}R setup. Risk is ${levels?.riskPct?.toFixed(1)}%, and the stop is under a real swing low.`,
+    `${S} volume is ${vol || "well above"} its weekly average. Here is the level I am watching.`,
+  ]);
 
-  return `Write a Binance Square post presenting a ${isWatch ? "tentative" : "clean"} long setup on $${symbol}.
+  return `Write a Binance Square post presenting a ${isWatch ? "tentative, half size" : "clean"} long setup on ${S}.
 
 ${factBlock}
 
 THE EVIDENCE THAT SUPPORTS IT:
 ${evidence || "- Momentum and volume are constructive."}
 
-THE RISKS, WHICH YOU MUST INCLUDE IN THE POST:
+THE RISKS, AT LEAST ONE MUST BE IN THE POST:
 ${risks || "- Any breakdown of the swing low invalidates the idea immediately."}
 
-THE LEVELS, USE THESE EXACTLY AND DO NOT RECALCULATE THEM:
+THE LEVELS, USE THESE EXACTLY:
 Entry zone: $${px(levels?.entryLow)} to $${px(levels?.entryHigh)}
-Stop loss: $${px(levels?.stop)}, which is ${levels?.riskPct?.toFixed(1)}% away and sits under the last swing low at $${px(levels?.invalidation)}
+Stop loss: $${px(levels?.stop)} (${levels?.riskPct?.toFixed(1)}% risk, under the swing low at $${px(levels?.invalidation)})
 TP1: $${px(levels?.targets?.[0])} (${levels?.targetR?.[0]}R)
 TP2: $${px(levels?.targets?.[1])} (${levels?.targetR?.[1]}R)
 TP3: $${px(levels?.targets?.[2])} (${levels?.targetR?.[2]}R)
 ${levels?.notes?.length ? `Note to include: ${levels.notes.join(" ")}` : ""}
 
-STRUCTURE TO FOLLOW:
-Line 1: a hook built on the strongest measured fact, not on excitement. It should make a reader want to check the chart.
-Then: 2 or 3 short lines explaining the setup using the evidence above. Every claim must map to a number you were given.
-Then: the levels, laid out clean and scannable, entry then stop then the three targets. Mention that risking to the stop is ${levels?.riskPct?.toFixed(1)}% and the first target pays ${rr}R.
-Then: a line naming exactly what kills the idea. Use the stop level. Say plainly that if it closes below there you are out and not arguing with it.
-Then: include at least one of the risks above, honestly. ${isWatch ? "Say clearly this is a watch and not a full size entry, and why." : ""}
-Then: ask a real question that invites disagreement. Something like whether readers see the same level, or what would make them fade this.
-End with: "Not financial advice. My levels, my risk. Size so a stop out does not hurt." and tags #${symbol} #TradingSetup
+${HOOK_RULE}
+Example hook shapes, do not copy them word for word:
+- ${hooks[0]}
+- ${hooks[1]}
+
+FLOW:
+First line: the hook.
+Then 2 or 3 short lines explaining why, each tied to a number from the evidence.
+Then the levels as a clean block, one per line, using these markers:
+🎯 Entry: ...
+🛑 Stop: ...
+✅ TP1 / TP2 / TP3: ...
+Then one line: if it closes below the stop you are out, no arguing with it.
+Then one line with a risk from the list, stated honestly.${isWatch ? " Say this is a watch, half size at most, and why." : ""}
+${CTA_RULE}
+Last line: a question answerable in one word, like "Taking it at the entry zone, or waiting for a dip?"
 
 ${VOICE}`;
+}
+
+/**
+ * Hashtags chosen in code.
+ *
+ * Square caps a post at 3. One slot goes to a trending hashtag only when it is
+ * actually about this coin, because a hot tag bolted onto an unrelated post brings
+ * readers who bounce. The coin tag always goes in. The last slot is a format tag.
+ */
+const FORMAT_TAGS = {
+  EVIDENCE_SIGNAL: "#TradingSetup",
+  NO_TRADE_CALL: "#RiskManagement",
+  LEVEL_ALERT: "#PriceAction",
+  TEACH: "#TradingTips",
+  QUICK_TAKE: "#MarketUpdate",
+  TRENDING_TOPIC: "#CryptoNews",
+  CALL_UPDATE: "#TradingJournal",
+};
+
+/** Split a CamelCase hashtag into its words, so "#ZECHitsANewHigh" yields "ZEC". */
+export function hashtagTokens(hashtag) {
+  return (String(hashtag).replace(/^#/, "").match(/[A-Z0-9]+(?![a-z])|[A-Z]?[a-z]+|\d+/g) || []).map((t) => t.toUpperCase());
+}
+
+export function findRelatedHashtag(hotList, symbol) {
+  if (!symbol || !hotList?.length) return null;
+  const sym = symbol.toUpperCase();
+  return hotList.find((h) => h?.hashtag && hashtagTokens(h.hashtag).includes(sym)) || null;
+}
+
+function buildHashtags(symbol, formatType, trendingTopic, hotList) {
+  const tags = [];
+  if (formatType === "TRENDING_TOPIC" && trendingTopic?.hashtag) {
+    tags.push(trendingTopic.hashtag);
+  } else {
+    const related = findRelatedHashtag(hotList, symbol);
+    if (related) tags.push(related.hashtag);
+  }
+  if (symbol && symbol !== "MARKET") tags.push(`#${symbol}`);
+  if (FORMAT_TAGS[formatType]) tags.push(FORMAT_TAGS[formatType]);
+  return [...new Set(tags)].slice(0, 3);
+}
+
+// Lines in the post that ask the reader to open the coin page. Used only when the
+// model forgot to include one, so the cashtag still gets a second, intentional click.
+const CASHTAG_CTA = [
+  (s) => `Tap $${s} and check the hourly chart yourself.`,
+  (s) => `Don't take my word for it. Tap $${s} and look at the candles.`,
+  (s) => `Open $${s} and set an alert at the level.`,
+];
+
+/**
+ * Turn raw model output into the post that gets published.
+ *
+ * - strips any hashtags the model wrote, then appends the chosen ones
+ * - guarantees the cashtag is in the first line, since that is what shows in the feed
+ * - guarantees a second cashtag mention in a "check it yourself" line
+ * - adds the data timestamp and track record, which only code can state truthfully
+ * - adds the disclaimer once
+ */
+export function finalizePost(text, { symbol, formatType, trendingTopic = null, hotList = [], trackRecord = null, now = Date.now() } = {}) {
+  let body = String(text)
+    .replace(/^\s*["'`]+|["'`]+\s*$/g, "")
+    .replace(/(^|[ \t])#[A-Za-z][A-Za-z0-9_]*/g, "$1")
+    .split("\n")
+    .map((l) => l.replace(/[ \t]+$/g, ""))
+    .join("\n")
+    // An emoji stranded on its own line reads as a rendering glitch; attach it to
+    // the line it was meant to mark.
+    .replace(/^((?:\p{Extended_Pictographic}️?\s?){1,2})\n+(?=\S)/gmu, (_, e) => `${e.trim()} `)
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  // Keep the first 4 line marker emojis. A wall of them is what pump accounts look like.
+  // The entry / stop / target lines are exempt, so the levels block stays uniform.
+  let emojiCount = 0;
+  body = body.replace(/^(\p{Extended_Pictographic}️?)\s*(?=(.*))/gmu, (m, _e, rest) => {
+    if (/^(entry|stop|tp\s?\d)/i.test(rest)) return m;
+    return ++emojiCount <= 4 ? m : "";
+  });
+
+  const hasSymbol = symbol && symbol !== "MARKET";
+  if (hasSymbol) {
+    const tag = `$${symbol}`;
+    const tagRe = new RegExp(`\\$${symbol}\\b`, "gi");
+    const bareRe = new RegExp(`(^|[^$A-Za-z0-9])(${symbol})\\b`);
+
+    const lines = body.split("\n");
+    if (!lines[0].match(tagRe)) {
+      // Upgrade a bare ticker in the hook if there is one, otherwise lead with it.
+      // Function replacement, because "$1$1000SATS" would read as back reference $10.
+      lines[0] = bareRe.test(lines[0]) ? lines[0].replace(bareRe, (_, pre) => `${pre}${tag}`) : `${tag}: ${lines[0]}`;
+    }
+    body = lines.join("\n");
+
+    const mentions = (body.match(tagRe) || []).length;
+    if (mentions < 2 && formatType !== "QUICK_TAKE") {
+      const cta = pick(CASHTAG_CTA)(symbol);
+      const blocks = body.split("\n\n");
+      // Before the closing question, which is conventionally the last block.
+      blocks.splice(Math.max(1, blocks.length - 1), 0, cta);
+      body = blocks.join("\n\n");
+    }
+  }
+
+  const footer = [];
+  if (trackRecord && ["EVIDENCE_SIGNAL", "NO_TRADE_CALL"].includes(formatType)) {
+    const sign = trackRecord.totalR >= 0 ? "+" : "";
+    footer.push(
+      `📒 My log, last ${trackRecord.days}d: ${trackRecord.total} calls closed, ${trackRecord.wins} hit a target, ${trackRecord.stopped} stopped. Net ${sign}${trackRecord.totalR.toFixed(1)}R, losses included.`
+    );
+  }
+
+  const d = new Date(now);
+  const stamp = `${d.getUTCDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()]} ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
+  const disclaimer = /not financial advice|\bnfa\b|\bdyor\b/i.test(body) ? "" : "Not financial advice.";
+  if (formatType !== "TRENDING_TOPIC") {
+    footer.push(`Binance data as of ${stamp}.${disclaimer ? ` ${disclaimer}` : ""}`);
+  } else if (disclaimer) {
+    footer.push(disclaimer);
+  }
+
+  const tags = buildHashtags(symbol, formatType, trendingTopic, hotList);
+  return [body, footer.join("\n"), tags.join(" ")].filter(Boolean).join("\n\n");
+}
+
+// Shortest believable post per format. Anything shorter was cut off or refused.
+const MIN_CHARS = {
+  EVIDENCE_SIGNAL: 280,
+  NO_TRADE_CALL: 220,
+  TEACH: 220,
+  TRENDING_TOPIC: 180,
+  LEVEL_ALERT: 110,
+  QUICK_TAKE: 60,
+};
+
+/**
+ * Reject output that would embarrass the account: a post cut off mid sentence, a
+ * copied instruction label ("THE LEVEL: $0.002448" went out like that), or an
+ * assistant preamble. Returns a list of problems, empty when the post is fine.
+ */
+export function lintPost(text, formatType) {
+  const problems = [];
+  const raw = String(text || "");
+  const body = raw.replace(/(^|\s)#[A-Za-z][A-Za-z0-9_]*/g, "$1").trim();
+
+  if (/^\s*(line\s*\d+|first line|hook|structure|flow|then|the level|the angle|verified market data|market data|output|post)\s*:/im.test(raw)) {
+    problems.push("it copied an instruction label into the post");
+  }
+  if (/\b(here is (the|your) post|here's (the|your) post|as an ai|i cannot help)\b/i.test(raw)) {
+    problems.push("it contains an assistant preamble");
+  }
+  const min = MIN_CHARS[formatType] ?? 150;
+  if (body.length < min) {
+    problems.push(`it is only ${body.length} characters, which reads as cut off`);
+  }
+  if (body && !/[.?!)"'’…%]$|\p{Extended_Pictographic}️?$/u.test(body)) {
+    problems.push("it ends mid sentence");
+  }
+  return problems;
 }
 
 /**
@@ -592,6 +869,19 @@ async function generateWithOpenRouter(prompt, apiKey, modelName = "qwen/qwen-2.5
 }
 
 /**
+ * The whole answer from a Gemini candidate. The model can split its reply across
+ * several parts; reading only the first one is how "Look at $LITEB trading at
+ * $967.5" went out as if it were a complete post.
+ */
+function geminiText(candidate) {
+  return (candidate?.content?.parts || [])
+    .filter((p) => !p.thought && typeof p.text === "string")
+    .map((p) => p.text)
+    .join("")
+    .trim();
+}
+
+/**
  * Generate post using Google Gemini API
  */
 async function generateWithGemini(prompt, apiKey, preferredModel) {
@@ -635,7 +925,20 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
         // whole provider: bailing to OpenRouter on a transient 503 was turning a few
         // seconds of Gemini load into a completely failed cycle.
         if ([404, 429, 500, 503].includes(res.status)) {
-          console.warn(`[gemini] Model '${model}' returned ${res.status}, trying next fallback...`);
+          // Say which kind of 429 this is. A per day quota means that model is done
+          // until Google's reset and no amount of retrying helps; a per minute one
+          // clears on its own. Both are handled the same way here (move to the next
+          // model, whose quota is counted separately) but the log should not make a
+          // daily cap look like a transient blip.
+          let detail = "";
+          if (res.status === 429) {
+            const limit = errText.match(/limit:\s*(\d+)/)?.[1];
+            const perDay = /PerDay|RequestsPerDay/i.test(errText);
+            detail = perDay
+              ? ` (daily free tier quota${limit ? ` of ${limit}` : ""} exhausted for this model until Google's reset)`
+              : ` (rate limited, this one clears on its own)`;
+          }
+          console.warn(`[gemini] Model '${model}' returned ${res.status}${detail}, trying next fallback...`);
           lastError = new Error(`Gemini API Error ${res.status} (${model}): ${errText.slice(0, 200)}`);
           continue;
         }
@@ -644,7 +947,7 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
 
       const json = await res.json();
       const candidate = json?.candidates?.[0];
-      const text = candidate?.content?.parts?.[0]?.text?.trim();
+      const text = geminiText(candidate);
 
       // A truncated post is worse than no post: it publishes a sentence that stops
       // halfway and makes the account look broken. Treat it as a failed attempt.
@@ -681,7 +984,7 @@ async function generateWithGemini(prompt, apiKey, preferredModel) {
     });
     if (res.ok) {
       const json = await res.json();
-      const text = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      const text = geminiText(json?.candidates?.[0]);
       if (text) {
         console.log(`[gemini] ✅ Successfully generated post using model: ${discovered}`);
         console.log(`[gemini] 💡 Set LLM_MODEL=${discovered} in .env to skip the fallback scan next time.`);
@@ -720,14 +1023,25 @@ export async function discoverGeminiModel(apiKey) {
     const usable = (json.models || [])
       .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
       .map((m) => m.name.replace(/^models\//, ""))
-      // Skip previews, experimental builds and non text variants; they are the ones
-      // most likely to disappear or behave oddly mid run.
-      .filter((n) => !/(preview|exp|thinking|image|audio|tts|embedding|vision)/i.test(n));
+      // Skip previews, experimental builds and everything that is not a text model.
+      // The list is full of image, speech, music and research variants that either
+      // reject a plain text prompt or behave oddly mid run.
+      .filter(
+        (n) =>
+          !/(preview|exp|thinking|image|audio|tts|embedding|vision|transcribe|robotics|computer-use|lyria|banana|deep-research|antigravity|omni)/i.test(n)
+      );
 
-    // Prefer flash for cost, then anything else. Higher version numbers first.
+    // Prefer lite over flagship. Counterintuitive for quality, but the flagship
+    // flash models are capped at 20 requests a day on the free tier and burn ~2000
+    // tokens per call on internal thinking, while lite has real headroom and
+    // thoughts=0. A post that ships beats a better post that hits a quota wall.
     const score = (n) => {
       const v = parseFloat((n.match(/(\d+\.?\d*)/) || [])[1] || "0");
-      return (/flash/i.test(n) ? 1000 : 0) + v;
+      let s = v;
+      if (/flash/i.test(n)) s += 1000;
+      if (/lite/i.test(n)) s += 2000;
+      if (/^gemma/i.test(n)) s -= 500; // works, but verbose and off style for this
+      return s;
     };
     usable.sort((a, b) => score(b) - score(a));
 
@@ -746,83 +1060,24 @@ export async function discoverGeminiModel(apiKey) {
 }
 
 /**
- * Universal Post Generator supporting Gemini or OpenRouter with 30% Signal / 70% News & Engagement mix
- */
-/**
- * Resolve high-quality relevant image URL for news, coin ecosystem, and target hit posts.
- */
-export function resolvePostImageUrl(coin, formatType = "", trendingTopic = null) {
-  if (formatType === "TRENDING_TOPIC") {
-    if (trendingTopic?.topImage) return trendingTopic.topImage;
-    const trendingImages = [
-      "https://images.unsplash.com/photo-1642543492481-44e81e3914a7?w=800&auto=format&fit=crop&q=80", // Crypto Trend / Liquidity
-      "https://images.unsplash.com/photo-1621416894569-0f39ed31d247?w=800&auto=format&fit=crop&q=80", // Bitcoin Market Momentum
-      "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop&q=80"  // Trading Analytics
-    ];
-    return trendingImages[Math.floor(Math.random() * trendingImages.length)];
-  }
-
-  const sym = (coin?.baseAsset || "").toLowerCase();
-  if (sym) {
-    return `https://assets.coincap.io/assets/icons/${sym}@2x.png`;
-  }
-
-  return null;
-}
-
-// Coincap has no icon for most newly listed small caps, which are precisely the
-// coins this bot posts about. Attaching a 404 means the post renders with a broken
-// thumbnail in the feed, and a post with no working image gets a fraction of the
-// impressions. Verified once per symbol, then cached for the process lifetime.
-const imageUrlCache = new Map();
-
-const FALLBACK_IMAGES = [
-  "https://images.unsplash.com/photo-1642543492481-44e81e3914a7?w=800&auto=format&fit=crop&q=80",
-  "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop&q=80",
-];
-
-async function urlResolves(url) {
-  if (!url) return false;
-  if (imageUrlCache.has(url)) return imageUrlCache.get(url);
-  try {
-    const res = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(6000) });
-    const ok = res.ok;
-    imageUrlCache.set(url, ok);
-    if (!ok) console.warn(`[image] ${url} returned ${res.status}, not attaching it.`);
-    return ok;
-  } catch (err) {
-    imageUrlCache.set(url, false);
-    console.warn(`[image] Could not verify ${url}: ${err.message}`);
-    return false;
-  }
-}
-
-/** Resolve an image that is known to load, or null. */
-export async function resolveVerifiedImageUrl(coin, formatType = "", trendingTopic = null) {
-  const primary = resolvePostImageUrl(coin, formatType, trendingTopic);
-  if (await urlResolves(primary)) return primary;
-
-  for (const fallback of FALLBACK_IMAGES) {
-    if (await urlResolves(fallback)) return fallback;
-  }
-  return null;
-}
-
-/**
- * Universal Post Generator supporting Gemini or OpenRouter:
- * 30% Top Gainer Signals (>45% Short, <45% Long), 30% FOMO Tease, 40% Trending Topics (Hot List)
+ * Generate one post: grade decides the format, the model writes it from measured
+ * numbers, code checks it and adds the parts only code can state truthfully.
  */
 export async function generateTraderPost(coin, allMovers, options = {}) {
-  // The chart decides the format, not a dice roll. This is the important change:
-  // previously every outcome was some flavour of "buy this", so the feed was 100%
-  // bullish forever. Now a weak chart produces a public pass, and only a genuinely
-  // strong one produces a signal with levels.
+  // The chart decides the format, not a dice roll. A weak chart produces a public
+  // pass, and only a genuinely strong one produces a signal with levels.
   const ctx = options.marketContext !== undefined ? options.marketContext : await buildMarketContext(coin);
   const grade = options.grade || gradeSetup(ctx);
   grade.ctx = ctx;
 
   let weightedFormats;
-  if (grade.verdict === "TRADE") {
+  if (options.preferSignals && grade.verdict === "TRADE") {
+    // Peak window with a chart that earned it: publish the setup.
+    weightedFormats = ["EVIDENCE_SIGNAL"];
+  } else if (options.preferSignals && grade.verdict === "WATCH") {
+    // Peak window, weaker chart: mostly a half size setup, sometimes just the level.
+    weightedFormats = ["EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "LEVEL_ALERT"];
+  } else if (grade.verdict === "TRADE") {
     weightedFormats = [
       "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL",
       "LEVEL_ALERT",
@@ -860,14 +1115,14 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
     formatType = "TEACH";
   }
 
+  let hotList = options.hotList || null;
   let trendingTopic = options.trendingTopic || null;
 
   if (formatType === "TRENDING_TOPIC" && !trendingTopic) {
     try {
-      const hotList = await getHotTrendingHashtags(3);
+      hotList = hotList || (await getHotTrendingHashtags(3));
       if (hotList && hotList.length > 0) {
         trendingTopic = hotList[Math.floor(Math.random() * hotList.length)];
-        console.log(`[hot-list] 🔥 Trending Context Loaded: ${trendingTopic.hashtag} (Coins: ${trendingTopic.trendingCoins?.join(", ") || "None"})`);
       }
     } catch (err) {
       console.warn(`[hot-list] Failed to fetch trending topic: ${err.message}`);
@@ -881,19 +1136,51 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
     formatType = grade.verdict === "NO_TRADE" ? "NO_TRADE_CALL" : "TEACH";
   }
 
-  const targetName = formatType === "TRENDING_TOPIC" && trendingTopic ? trendingTopic.hashtag : `$${coin?.baseAsset || "MARKET"}`;
+  // A trending topic post only earns a cashtag when the topic names a real, listed
+  // coin. That coin, not the one the scheduler picked, is who the post is about.
+  let topicCoin = null;
+  if (formatType === "TRENDING_TOPIC") {
+    const pairs = options.allPairs || allMovers || [];
+    const tokens = hashtagTokens(trendingTopic.hashtag);
+    topicCoin = pairs.find((p) => tokens.includes(p.baseAsset)) || null;
+    console.log(`[hot-list] 🔥 Topic ${trendingTopic.hashtag}${topicCoin ? `, linked coin $${topicCoin.baseAsset}` : ", no listed coin in it"}`);
+
+    // A topic with no coin in it can still pull hashtag page views, but it carries no
+    // cashtag at all, so nothing in it can be clicked through to a coin. Keep those to
+    // roughly a third of topic posts and write about the chart the rest of the time.
+    if (!topicCoin && !options.format && Math.random() < 0.67) {
+      formatType = grade.verdict === "NO_TRADE" ? "NO_TRADE_CALL" : "LEVEL_ALERT";
+      trendingTopic = options.trendingTopic || null;
+      console.log(`[hot-list] Topic has no coin to tag, writing ${formatType} on $${coin?.baseAsset} instead.`);
+    }
+  }
+
+  const postSymbol = formatType === "TRENDING_TOPIC" ? topicCoin?.baseAsset || null : coin?.baseAsset;
+  const targetName = formatType === "TRENDING_TOPIC" ? trendingTopic.hashtag : `$${coin?.baseAsset || "MARKET"}`;
   console.log(`[ai] Format [${formatType}] for ${targetName} (verdict: ${grade.verdict}, score: ${grade.score})`);
 
-  const prompt = buildMultiFormatPrompt(coin, formatType, allMovers, trendingTopic, grade);
-  const imageUrl = await resolveVerifiedImageUrl(coin, formatType, trendingTopic);
-  
+  const prompt = buildMultiFormatPrompt(coin, formatType, allMovers, trendingTopic, grade, { topicCoin });
+
+  // Numbers are checked against whichever coin the post is actually about.
+  const checkCtx =
+    formatType === "TRENDING_TOPIC"
+      ? topicCoin
+        ? {
+            price: topicCoin.lastPrice,
+            rangeLow: topicCoin.lowPrice,
+            rangeHigh: topicCoin.highPrice,
+            low7d: topicCoin.lowPrice,
+            high7d: topicCoin.highPrice,
+          }
+        : null
+      : ctx;
+  const checkLevels = formatType === "TRENDING_TOPIC" ? null : grade.levels;
+
   const rawProvider = String(options.provider || "").trim().toLowerCase();
   const isGemini = rawProvider === "1" || rawProvider === "gemini";
   const isOpenRouter = rawProvider === "openrouter" || rawProvider === "2" || (!isGemini && options.openrouterKey);
 
   // Try the configured provider, then fall back to the other one if a key exists.
-  // An out of credit or rate limited provider used to abort the whole cycle and skip
-  // the slot entirely; with both keys configured there is no reason for that.
   const runModel = async (p) => {
     const primary = isOpenRouter ? "openrouter" : "gemini";
     const order = primary === "openrouter" ? ["openrouter", "gemini"] : ["gemini", "openrouter"];
@@ -903,9 +1190,7 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
       const key = provider === "openrouter" ? options.openrouterKey : options.geminiKey;
       if (!key) continue;
       try {
-        // LLM_MODEL names a model on the PRIMARY provider only. Passing it to the
-        // fallback sent "gemini-3.8-flash" to OpenRouter, which is not a model it
-        // has; the fallback must use its own default instead.
+        // LLM_MODEL names a model on the PRIMARY provider only.
         const model = provider === primary ? options.model : undefined;
         if (provider === "openrouter") {
           return await generateWithOpenRouter(p, key, model || "qwen/qwen-2.5-7b-instruct");
@@ -920,79 +1205,99 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
     throw lastErr || new Error("No LLM API key configured. Set OPENROUTER_API_KEY or GEMINI_API_KEY in .env");
   };
 
-  let text = await runModel(prompt);
+  const review = (t) => ({
+    problems: lintPost(t, formatType),
+    numbers: validatePostNumbers(t, checkCtx, checkLevels),
+  });
 
-  // Reject invented price levels and retry once with the offenders named. If the
-  // second attempt is still fabricating, fall through with a warning rather than
-  // silently publishing numbers that are not on the chart.
-  const check = validatePostNumbers(text, ctx, grade.levels);
-  if (!check.ok) {
-    console.warn(`[validate] ⚠️ Post contained price levels that are not in the data: ${check.offenders.join(", ")}. Retrying once.`);
+  let text = await runModel(prompt);
+  let result = review(text);
+
+  // One retry, naming exactly what was wrong. Invented prices, a cut off post and a
+  // copied instruction label are each the kind of thing a reader notices once and
+  // then discounts the account for.
+  if (result.problems.length || !result.numbers.ok) {
+    const issues = [
+      ...result.problems,
+      ...(result.numbers.ok ? [] : [`it used price levels that are not in the data: ${result.numbers.offenders.join(", ")}`]),
+    ];
+    console.warn(`[review] ⚠️ Rejected first draft: ${issues.join("; ")}. Retrying once.`);
     const retryPrompt = `${prompt}
 
-RETRY. Your previous attempt contained these price levels, which do not exist in the data you were given: ${check.offenders.join(", ")}. You invented them. Rewrite the post using ONLY the price levels listed above, and do not introduce any dollar figure that was not given to you.`;
+RETRY. Your previous attempt was rejected because ${issues.join("; ")}. Write the complete post again from scratch, following every rule, using only the numbers given above.`;
     const retryText = await runModel(retryPrompt);
-    const recheck = validatePostNumbers(retryText, ctx, grade.levels);
-    if (recheck.ok) {
+    const retry = review(retryText);
+
+    const score = (r) => r.problems.length * 10 + r.numbers.offenders.length;
+    if (score(retry) <= score(result)) {
       text = retryText;
-    } else {
-      console.warn(`[validate] ❌ Retry still contained invented levels: ${recheck.offenders.join(", ")}. Using the cleaner of the two.`);
-      text = recheck.offenders.length < check.offenders.length ? retryText : text;
+      result = retry;
     }
   }
 
-  // If caller expects a simple string, return text with metadata attached
-  const result = new String(text);
-  result.text = text;
-  result.formatType = formatType;
-  result.imageUrl = imageUrl;
-  result.images = imageUrl ? [imageUrl] : [];
-  result.grade = grade;
-  result.verdict = grade.verdict;
+  // Structural problems are not publishable at all. Invented numbers that survived a
+  // retry are logged loudly; the in range check already filtered anything absurd.
+  if (result.problems.length) {
+    throw new Error(`Post failed review twice (${result.problems.join("; ")}). Not publishing it.`);
+  }
+  if (!result.numbers.ok) {
+    console.warn(`[review] ❌ Post still references levels not in the data: ${result.numbers.offenders.join(", ")}`);
+  }
+
+  const finalText = finalizePost(text, {
+    symbol: postSymbol,
+    formatType,
+    trendingTopic,
+    hotList: hotList || [],
+    trackRecord: options.trackRecord || null,
+  });
+
+  const out = new String(finalText);
+  out.text = finalText;
+  out.formatType = formatType;
+  out.primarySymbol = postSymbol;
+  out.hashtag = trendingTopic?.hashtag || null;
+  out.grade = grade;
+  out.verdict = grade.verdict;
   // Only formats that actually publish levels get logged as a call to be graded later.
-  result.levels = formatType === "EVIDENCE_SIGNAL" ? grade.levels : null;
-  return result;
+  out.levels = formatType === "EVIDENCE_SIGNAL" ? grade.levels : null;
+  return out;
 }
 
 /**
- * Publish post to Binance Square OpenAPI (supports text and images).
- * @param {string|object} content Post text or object containing { text, imageUrl, images }
- * @param {string} apiKey Binance Square API Key
- * @param {object} [options] Optional publish options e.g. { imageUrl, images }
- * @returns {Promise<object>}
+ * Clean text for Square without changing what it says.
+ *
+ * Exported separately so it can be checked without publishing anything.
  */
-export async function publishToSquare(content, apiKey, options = {}) {
-  console.log("[publish] Publishing post to Binance Square...");
-
-  const rawText = typeof content === "object" && content.text ? content.text : String(content);
-  const imageUrl = options.imageUrl || (typeof content === "object" ? content.imageUrl : null);
-  const images = options.images || (typeof content === "object" && content.images ? content.images : (imageUrl ? [imageUrl] : []));
-
-  // 1. Sanitize cashtags ($SYMBOL): Binance limits to max 2 distinct coin pairs per post
-  const seenCoins = new Set();
-  let sanitized = rawText.replace(/\$([A-Za-z0-9]+)/g, (match, symbol) => {
-    const symUpper = symbol.toUpperCase();
-    if (seenCoins.has(symUpper)) return match;
-    if (seenCoins.size < 2) {
-      seenCoins.add(symUpper);
-      return match;
+export function sanitizeForSquare(rawText, { primarySymbol = null } = {}) {
+  // 1. Cashtags. Square links at most 2 distinct coins per post, so keep the coin
+  //    the post is about plus the first other one, and drop the `$` from the rest.
+  //
+  //    A cashtag must contain a letter. Without that rule every price counted as a
+  //    coin: in "$FF ... entry $0.41 ... TP $0.45" the prices used up both slots and
+  //    later mentions of $FF lost their link, and the prices lost their dollar sign.
+  const keep = new Set(primarySymbol ? [primarySymbol.toUpperCase()] : []);
+  let sanitized = String(rawText).replace(/\$([A-Za-z0-9]{1,15})\b/g, (match, symbol) => {
+    if (!/[A-Za-z]/.test(symbol)) return match; // a price
+    if (/^\d+(\.\d+)?[KMBT]$/i.test(symbol)) return match; // $15M volume
+    const up = symbol.toUpperCase();
+    if (keep.has(up)) return `$${up}`;
+    if (keep.size < 2) {
+      keep.add(up);
+      return `$${up}`;
     }
-    return symbol; // drop $ to avoid coin pair limit
+    return up;
   });
 
-  // 2. Sanitize hashtags (#TAG): Binance limits to max 3 hashtags per post
+  // 2. Hashtags: max 3 per post.
   let hashtagCount = 0;
-  sanitized = sanitized.replace(/#([A-Za-z0-9_]+)/g, (match, tag) => {
+  sanitized = sanitized.replace(/#([A-Za-z][A-Za-z0-9_]*)/g, (match) => {
     hashtagCount++;
-    if (hashtagCount <= 3) {
-      return match;
-    }
-    return ""; // remove excess hashtags cleanly
+    return hashtagCount <= 3 ? match : "";
   });
 
-  // 3. Strip outcome promises. The prompts forbid these, but a model under a hype
-  //    prior will still occasionally emit one, and a single "guaranteed 100x" undoes
-  //    weeks of building credibility. Cheaper to catch it here than to trust the LLM.
+  // 3. Strip outcome promises. The prompts forbid these, but a single "guaranteed
+  //    100x" undoes weeks of credibility, so there is a net under the net.
   const PROMISE_PATTERNS = [
     [/\bguaranteed?\b/gi, "likely"],
     [/\beasy money\b/gi, "a setup"],
@@ -1013,52 +1318,54 @@ export async function publishToSquare(content, apiKey, options = {}) {
     }
   }
 
-  // 4. Guarantee the risk disclosure is present even if the model dropped it.
-  if (!/not financial advice|nfa\b|dyor/i.test(sanitized)) {
-    sanitized += "\n\nNot financial advice. My levels, my risk.";
+  // 4. Disclaimer, if nothing upstream added one.
+  if (!/not financial advice|\bnfa\b|\bdyor\b/i.test(sanitized)) {
+    sanitized += "\n\nNot financial advice.";
   }
 
-  // 5. Remove dashes while strictly preserving line breaks and clean paragraph spacing
-  sanitized = sanitized
+  // 5. Dashes out, line structure kept. Level blocks stay one per line.
+  return sanitized
     .replace(/--+/g, " ")
+    .replace(/\s[—–]\s/g, ". ")
     .replace(/[—–]/g, " ")
-    .replace(/[ \t]+/g, " ")               // Collapse multiple spaces on same line
-    .replace(/\n\s*\n\s*\n+/g, "\n\n")     // Max 1 empty line between paragraphs
-    .replace(/([^\n])\s*(✅|🔥|💡|🎯|🚨|🐂|🐻)/g, "$1\n\n$2") // Ensure clean line break before major emojis/sections
+    .replace(/[ \t]+/g, " ")
+    .replace(/ +\n/g, "\n")
+    .replace(/\n\s*\n\s*\n+/g, "\n\n")
     .trim();
+}
 
-  let richContent = sanitized;
-  if (images && Array.isArray(images) && images.length > 0) {
-    // Embed markdown image tag into rich content so Binance Square web/app renderer shows the image
-    richContent = `${sanitized}\n\n![Market Visual](${images[0]})`;
-  }
+/**
+ * Publish a text post to Binance Square.
+ *
+ * @param {string|object} content Post text, or the object from generateTraderPost
+ * @param {string} apiKey Binance Square OpenAPI key
+ * @param {object} [options] { primarySymbol }
+ * @returns {Promise<{postId: string|null, shareLink: string|null, raw: object}>}
+ */
+export async function publishToSquare(content, apiKey, options = {}) {
+  console.log("[publish] Publishing post to Binance Square...");
 
-  const payload = {
-    bodyTextOnly: sanitized,
-    contentType: 1,
-    content: richContent,
-  };
-
-  // Attach images to payload
-  if (images && Array.isArray(images) && images.length > 0) {
-    payload.picList = images;
-    payload.pics = images;
-    console.log(`[publish] 🖼️ Attached ${images.length} image(s) to post: ${images[0]}`);
-  }
+  const rawText = typeof content === "object" && content.text ? content.text : String(content);
+  const primarySymbol = options.primarySymbol || (typeof content === "object" ? content.primarySymbol : null);
+  const text = sanitizeForSquare(rawText, { primarySymbol });
 
   const res = await fetch(BINANCE_SQUARE_PUBLISH_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Square-OpenAPI-Key": apiKey,
-      "clienttype": "binanceSkill",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      "Accept": "application/json, text/plain, */*",
-      "Origin": "https://www.binance.com",
-      "Referer": "https://www.binance.com/en/square",
+      clienttype: "binanceSkill",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ contentType: 1, bodyTextOnly: text }),
   });
+
+  // Binance's own client treats a 504 from this endpoint as published without an id.
+  // Throwing here would fail the cycle, skip recording the post, and let the next run
+  // publish a near duplicate.
+  if (res.status === 504) {
+    console.warn("[publish] ⚠️ Gateway timeout. Binance treats this as published, recording it without a post id.");
+    return { postId: null, shareLink: null, raw: null };
+  }
 
   const responseText = await res.text();
   let json;
@@ -1072,6 +1379,8 @@ export async function publishToSquare(content, apiKey, options = {}) {
     throw new Error(`Binance Square API returned error: ${responseText}`);
   }
 
-  console.log("[publish] ✅ Successfully published to Binance Square!");
-  return json;
+  const postId = json?.data?.id ? String(json.data.id) : null;
+  const shareLink = json?.data?.shareLink || (postId ? `https://www.binance.com/square/post/${postId}` : null);
+  console.log(`[publish] ✅ Published to Binance Square${shareLink ? `: ${shareLink}` : "."}`);
+  return { postId, shareLink, raw: json };
 }

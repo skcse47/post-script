@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 
-import { getMarketMovers, getHotTrendingHashtags, generateTraderPost } from "./src/topGainersBot.js";
+import { getMarketMovers, getHotTrendingHashtags, generateTraderPost, sanitizeForSquare } from "./src/topGainersBot.js";
 import { buildMarketContext, gradeSetup, fmtPx, fmtCompact } from "./src/marketContext.js";
 
 function loadDotEnv() {
@@ -97,11 +97,12 @@ async function main() {
   }
 
   let trendingTopic = null;
+  let hotList = [];
   try {
-    const hot = await getHotTrendingHashtags(3);
-    if (hot?.length) {
-      trendingTopic = hot[0];
-      console.log(`Trending on Square: ${hot.map((h) => h.hashtag).join(", ")}\n`);
+    hotList = (await getHotTrendingHashtags(3)) || [];
+    if (hotList.length) {
+      trendingTopic = hotList[0];
+      console.log(`Trending on Square: ${hotList.map((h) => h.hashtag).join(", ")}\n`);
     }
   } catch {}
 
@@ -116,12 +117,15 @@ async function main() {
     openrouterKey: process.env.OPENROUTER_API_KEY,
     model,
     trendingTopic,
+    hotList,
+    allPairs: movers.all,
     marketContext: pick.ctx,
     grade: pick.grade,
     format: forcedFormat,
   });
 
-  console.log(post.text);
+  // Show the text exactly as Square would receive it.
+  console.log(sanitizeForSquare(post.text, { primarySymbol: post.primarySymbol }));
   console.log("\n" + line());
   console.log(`format: ${post.formatType} | verdict: ${post.verdict} | chars: ${post.text.length}`);
   console.log(post.levels?.stop ? "This post publishes levels, so it would be logged as a gradeable call." : "No levels published, nothing logged as a call.");

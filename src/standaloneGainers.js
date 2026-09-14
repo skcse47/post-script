@@ -21,10 +21,17 @@ import {
   generateTraderPost,
   publishToSquare,
   formatPrice,
+  hashtagTokens,
+  findRelatedHashtag,
+  AUDIENCE_MIN_VOLUME_USDT,
 } from "./topGainersBot.js";
 import { buildMarketContext, gradeSetup } from "./marketContext.js";
 import {
   TRADE_CALLS_SCHEMA,
+  migrateTradeCalls,
+  getPendingCallUpdate,
+  markCallUpdatePosted,
+  buildCallUpdatePost,
   recordCall,
   resolveOpenCalls,
   getTrackRecord,
@@ -122,6 +129,8 @@ try { db.exec("ALTER TABLE post_history ADD COLUMN category TEXT DEFAULT 'gainer
 try { db.exec("ALTER TABLE post_history ADD COLUMN base_asset TEXT DEFAULT ''"); } catch (e) {}
 try { db.exec("ALTER TABLE post_history ADD COLUMN format_type TEXT DEFAULT ''"); } catch (e) {}
 try { db.exec("ALTER TABLE post_history ADD COLUMN is_trending INTEGER DEFAULT 0"); } catch (e) {}
+try { db.exec("ALTER TABLE post_history ADD COLUMN share_link TEXT"); } catch (e) {}
+migrateTradeCalls(db);
 
 /**
  * Get state value from SQLite
@@ -152,10 +161,10 @@ function getLastPostTime() {
 /**
  * Record a published post in SQLite with full tracking
  */
-function recordPost(symbol, category, price, changePct, content, baseAsset = '', formatType = '', isTrending = false) {
+function recordPost(symbol, category, price, changePct, content, baseAsset = '', formatType = '', isTrending = false, shareLink = null) {
   db.prepare(
-    "INSERT INTO post_history (symbol, category, base_asset, format_type, price, change_pct, post_content, is_trending) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-  ).run(symbol, category, baseAsset, formatType, price, changePct, content, isTrending ? 1 : 0);
+    "INSERT INTO post_history (symbol, category, base_asset, format_type, price, change_pct, post_content, is_trending, share_link) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(symbol, category, baseAsset, formatType, price, changePct, content, isTrending ? 1 : 0, shareLink);
 
   // Update coin performance tracking
   if (baseAsset) {
@@ -169,21 +178,6 @@ function recordPost(symbol, category, price, changePct, content, baseAsset = '',
         last_posted_at = CURRENT_TIMESTAMP
     `).run(baseAsset, isTrending ? 1 : 0, isTrending ? 2.0 : 0.5, isTrending ? 1 : 0, isTrending ? 2.0 : 0.5);
   }
-}
-
-/**
- * Get coins with highest priority scores (trending overlap = high engagement proxy)
- * Returns coins sorted by priority_score DESC, only those posted in the last 48 hours
- */
-function getHighPriorityCoins(limit = 5) {
-  return db.prepare(`
-    SELECT base_asset, total_posts, trending_hits, priority_score, last_posted_at
-    FROM coin_performance
-    WHERE last_posted_at > datetime('now', '-48 hours')
-      AND trending_hits > 0
-    ORDER BY priority_score DESC
-    LIMIT ?
-  `).all(limit);
 }
 
 /**
@@ -260,12 +254,80 @@ async function tryPublishTrackRecord() {
     return true;
   }
 
+  let published = null;
   if (canPublish()) {
-    await publishToSquare({ text, images: [] }, BINANCE_SQUARE_API_KEY);
+    published = await publishToSquare({ text }, BINANCE_SQUARE_API_KEY, { primarySymbol: stats.best.asset });
   }
-  recordPost("TRACK_RECORD", "recap", 0, stats.totalR, text, "", "TRACK_RECORD", false);
+  recordPost("TRACK_RECORD", "recap", 0, stats.totalR, text, "", "TRACK_RECORD", false, published?.shareLink);
   console.log(`[track] ✅ Published ${stats.days} day recap: ${stats.wins}W / ${stats.stopped}L, net ${stats.totalR.toFixed(1)}R`);
   return true;
+}
+
+/**
+ * Follow up on a call that just hit a target or its stop.
+ *
+ * Posted within hours of the result, linking back to the original. Readers who saw
+ * the call get the ending, readers who did not get a verifiable receipt, and the
+ * losses go out the same way as the wins. Spaced so a busy day cannot turn the feed
+ * into nothing but updates.
+ */
+async function tryPublishCallUpdate() {
+  if (countRecentFormat("CALL_UPDATE", 3) > 0) return false;
+
+  const call = getPendingCallUpdate(db, { maxAgeHours: 24 });
+  if (!call) return false;
+
+  const text = buildCallUpdatePost(call);
+  if (!text) return false;
+
+  console.log(`\n📝 ─── GENERATED POST [CALL_UPDATE] ───\n`);
+  console.log(text);
+  console.log(`\n─────────────────────────────────\n`);
+
+  if (DRY_RUN) {
+    console.log(`[track] 🧪 DRY_RUN is set. Update for call #${call.id} not published and not marked.`);
+    return true;
+  }
+
+  let published = null;
+  if (canPublish()) {
+    published = await publishToSquare({ text }, BINANCE_SQUARE_API_KEY, { primarySymbol: call.base_asset });
+  }
+  recordPost(call.symbol, "update", call.resolved_price || 0, call.result_r || 0, text, call.base_asset, "CALL_UPDATE", false, published?.shareLink);
+  markCallUpdatePosted(db, call.id);
+  console.log(`[track] ✅ Posted update for call #${call.id} on $${call.base_asset}: ${call.status} ${(call.result_r || 0).toFixed(1)}R`);
+  return true;
+}
+
+/**
+ * Grade each coin and return the strongest tradable one, or null.
+ *
+ * TRADE beats WATCH, then the higher score wins. Coins with no candle data or a
+ * NO_TRADE grade are never returned, which is what keeps the peak window from
+ * turning into a stream of forced buy calls.
+ */
+async function pickBestSetup(coins) {
+  const seen = new Set();
+  const unique = coins.filter((c) => c && !seen.has(c.baseAsset) && seen.add(c.baseAsset));
+
+  const graded = await Promise.all(
+    unique.map(async (coin) => {
+      const ctx = await buildMarketContext(coin);
+      const grade = gradeSetup(ctx);
+      grade.ctx = ctx;
+      return { coin, ctx, grade };
+    })
+  );
+
+  const rank = { TRADE: 2, WATCH: 1 };
+  const tradable = graded
+    .filter((g) => rank[g.grade.verdict] && g.grade.levels?.stop)
+    .sort((a, b) => rank[b.grade.verdict] - rank[a.grade.verdict] || b.grade.score - a.grade.score);
+
+  console.log(
+    `[peak] Graded ${graded.length}: ${graded.map((g) => `$${g.coin.baseAsset} ${g.grade.verdict}(${g.grade.score})`).join(", ")}`
+  );
+  return tradable[0] || null;
 }
 
 // ─── Main Execution Pipeline ─────────────────────────────────────────────────
@@ -302,27 +364,23 @@ export async function executeRoundRobinCycle() {
       throw new Error("No valid altcoin gainers found from Binance API.");
     }
 
-    // 2. Fetch trending topics to detect engagement overlap
+    // 2. What Square is talking about right now. Coins named in a hot hashtag or in
+    //    the top trending post are the ones people are already opening coin pages for.
     let trendingCoins = [];
     let trendingTopic = null;
+    let hotList = [];
     try {
-      const hotList = await getHotTrendingHashtags(3);
-      if (hotList && hotList.length > 0) {
-        trendingCoins = hotList.flatMap(h => h.trendingCoins || []);
+      hotList = (await getHotTrendingHashtags(3)) || [];
+      if (hotList.length > 0) {
+        const fromTags = hotList.flatMap((h) => hashtagTokens(h.hashtag));
+        const listed = new Set(movers.all.map((p) => p.baseAsset));
+        trendingCoins = [...new Set([...hotList.flatMap((h) => h.trendingCoins || []), ...fromTags.filter((t) => listed.has(t))])];
         trendingTopic = hotList[Math.floor(Math.random() * hotList.length)];
+        console.log(`[hot-list] 🔥 Hot hashtags: ${hotList.map((h) => h.hashtag).join(", ")}`);
         console.log(`[hot-list] 🔥 Trending coins detected: ${trendingCoins.join(", ") || "None"}`);
       }
     } catch (err) {
       console.warn(`[hot-list] Could not fetch trending data: ${err.message}`);
-    }
-
-    // 3. Check priority coins from past performance
-    const priorityCoins = getHighPriorityCoins(3);
-    if (priorityCoins.length > 0) {
-      console.log(`\n⭐ High Priority Coins (trending overlap in last 48h):`);
-      priorityCoins.forEach((p, i) => {
-        console.log(`   ${i + 1}. $${p.base_asset} (score: ${p.priority_score.toFixed(1)}, trending hits: ${p.trending_hits}, posts: ${p.total_posts})`);
-      });
     }
 
     console.log(`\n📊 Live Top Altcoin Gainers:`);
@@ -340,13 +398,24 @@ export async function executeRoundRobinCycle() {
       console.warn(`[track] Could not resolve open calls: ${err.message}`);
     }
 
-    // 5. Roughly once a day, post the real track record instead of another setup.
-    //    Receipts convert far better than another buy call, but only real ones.
-    if (Math.random() < 0.12 && (await tryPublishTrackRecord())) {
+    // 5. A call that just hit a target or its stop gets its follow up first. Of
+    //    everything this bot posts, a public receipt is what makes the rest credible.
+    if (await tryPublishCallUpdate()) {
       return true;
     }
 
-    // 6. Select a coin, skipping anything already posted about recently.
+    // Inside the peak window the slots go to trade setups. Call updates above still
+    // run, since a fresh receipt in front of the biggest audience is worth the slot.
+    const peak = isPeakWindow();
+    if (peak) console.log(`[peak] 🌅 Inside the ${PEAK_WINDOW_IST} IST peak window, looking for a trade setup first.`);
+
+    // 6. Roughly once a day, post the real track record instead of another setup.
+    //    Receipts convert far better than another buy call, but only real ones.
+    if (!peak && Math.random() < 0.12 && (await tryPublishTrackRecord())) {
+      return true;
+    }
+
+    // 7. Select a coin, skipping anything already posted about recently.
     const cooldown = recentlyPostedAssets(Number(process.env.COIN_COOLDOWN_HOURS || 6));
     const candidates = movers.queue.filter((c) => !cooldown.has(c.baseAsset));
     const pool = candidates.length > 0 ? candidates : movers.queue;
@@ -359,13 +428,32 @@ export async function executeRoundRobinCycle() {
     const targetIndex = currentIndex % pool.length;
     let currentCoin = pool[targetIndex];
 
-    // If a high-priority coin is also in the eligible pool, prefer it.
-    if (priorityCoins.length > 0 && Math.random() < 0.5) {
-      const priorityMatch = pool.find((g) => priorityCoins.some((p) => p.base_asset === g.baseAsset));
-      if (priorityMatch) {
-        currentCoin = priorityMatch;
-        console.log(`[priority] ⭐ Boosted $${currentCoin.baseAsset} from priority list (trending overlap engagement)`);
+    // Half the time, write about a coin Square is already talking about, if one is
+    // liquid and outside its cooldown. The post then lands where readers already are:
+    // on the coin page their feed is sending them to, and under its trending hashtag.
+    const trendingSet = new Set(trendingCoins.map((c) => c.toUpperCase()));
+    const trendingPicks = movers.all
+      .filter((p) => trendingSet.has(p.baseAsset) && p.quoteVolume >= AUDIENCE_MIN_VOLUME_USDT && !cooldown.has(p.baseAsset))
+      .sort((a, b) => b.quoteVolume - a.quoteVolume);
+    let marketContext;
+    let grade;
+
+    if (peak) {
+      // Grade a shortlist and take the strongest chart. A signal still needs the chart
+      // to earn it: if nothing grades TRADE or WATCH, the cycle carries on as normal
+      // and posts a pass or a lesson rather than a manufactured setup.
+      const best = await pickBestSetup([...trendingPicks.slice(0, 2), ...pool.slice(0, 6)]);
+      if (best) {
+        currentCoin = best.coin;
+        marketContext = best.ctx;
+        grade = best.grade;
+        console.log(`[peak] 🎯 Best setup: $${currentCoin.baseAsset} graded ${grade.verdict} (score ${grade.score}).`);
+      } else {
+        console.log(`[peak] No chart on the shortlist grades tradable right now. Not forcing a signal.`);
       }
+    } else if (trendingPicks.length > 0 && Math.random() < 0.5) {
+      currentCoin = trendingPicks[0];
+      console.log(`[trending] 🔥 Writing about $${currentCoin.baseAsset}, which is trending on Square right now.`);
     }
 
     const coinIsTrending = isCoinTrending(currentCoin.baseAsset, trendingCoins);
@@ -374,23 +462,34 @@ export async function executeRoundRobinCycle() {
     const changeStr = `${currentCoin.priceChangePercent >= 0 ? "+" : ""}${currentCoin.priceChangePercent.toFixed(1)}%`;
     console.log(`\n🎯 [${startTime}] Selected: $${currentCoin.baseAsset} (${changeStr}) at $${formatPrice(currentCoin.lastPrice)}${coinIsTrending ? ' [TRENDING 🔥]' : ''}`);
 
-    // 7. Grade the chart. The verdict decides which kind of post gets written.
-    const marketContext = await buildMarketContext(currentCoin);
-    const grade = gradeSetup(marketContext);
-    grade.ctx = marketContext;
+    // 8. Grade the chart. The verdict decides which kind of post gets written.
+    //    The peak shortlist has already graded the chosen coin, so reuse that.
+    if (!grade) {
+      marketContext = await buildMarketContext(currentCoin);
+      grade = gradeSetup(marketContext);
+      grade.ctx = marketContext;
+    }
     console.log(`[grade] $${currentCoin.baseAsset} => ${grade.verdict} (score ${grade.score})`);
     grade.reasons.forEach((r) => console.log(`   + ${r}`));
     grade.warnings.forEach((r) => console.log(`   - ${r}`));
 
     console.log(`[ai] Generating post via ${LLM_PROVIDER.toUpperCase()}...`);
+    // A trending topic that names this coin beats a random one: same audience twice.
+    const relatedTopic = findRelatedHashtag(hotList, currentCoin.baseAsset);
+
     const postContent = await generateTraderPost(currentCoin, movers.queue, {
       provider: LLM_PROVIDER,
       geminiKey: GEMINI_API_KEY,
       openrouterKey: OPENROUTER_API_KEY,
       model: LLM_MODEL,
-      trendingTopic: trendingTopic,
+      trendingTopic: relatedTopic || trendingTopic,
+      hotList,
+      allPairs: movers.all,
+      // Only a record with enough settled calls to mean something is quoted.
+      trackRecord: getTrackRecord(db, { days: 7, minCalls: 5 }),
       marketContext,
       grade,
+      preferSignals: peak,
     });
 
     const formatType = postContent.formatType || "EVIDENCE_SIGNAL";
@@ -400,8 +499,9 @@ export async function executeRoundRobinCycle() {
     console.log(`\n─────────────────────────────────\n`);
 
     // Publish to Binance Square
+    let published = null;
     if (canPublish()) {
-      await publishToSquare(postContent, BINANCE_SQUARE_API_KEY);
+      published = await publishToSquare(postContent, BINANCE_SQUARE_API_KEY);
       console.log(`[cycle] ✅ Post published.`);
     } else if (DRY_RUN) {
       console.log(`[publish] 🧪 DRY_RUN is set. Nothing was published.`);
@@ -421,12 +521,13 @@ export async function executeRoundRobinCycle() {
         postContent.text || postContent,
         currentCoin.baseAsset,
         formatType,
-        coinIsTrending
+        coinIsTrending,
+        published?.shareLink
       );
     }
 
-    // 8. If this post published actual levels, log it as a call so it gets graded
-    //    later whether it works or not. This is what makes the recap post real.
+    // 9. If this post published actual levels, log it as a call so it gets graded
+    //    later whether it works or not, and so its follow up can link back to it.
     if (postContent.levels?.stop && !DRY_RUN) {
       const callId = recordCall(db, {
         symbol: currentCoin.symbol,
@@ -434,6 +535,7 @@ export async function executeRoundRobinCycle() {
         direction: grade.direction,
         verdict: grade.verdict,
         levels: postContent.levels,
+        shareLink: published?.shareLink,
       });
       if (callId) console.log(`[track] Logged call #${callId} on $${currentCoin.baseAsset}, it will be graded against real candles.`);
     }
@@ -466,19 +568,50 @@ const CRON_EXPR =
     ? `0 */${Math.round(POST_INTERVAL_MINUTES / 60)} * * *`
     : `*/${POST_INTERVAL_MINUTES} * * * *`;
 
+// Peak window.
+//
+// This account's posts measurably get the most reach between 05:00 and 09:00 IST
+// (Asia waking up, US evening still online). Inside that window the bot posts more
+// often and goes looking for a real trade setup instead of rotating through formats.
+// Written in IST because that is how it was observed; override with
+// PEAK_WINDOW_IST=HH:MM-HH:MM, or set it to "off".
+const PEAK_WINDOW_IST = (process.env.PEAK_WINDOW_IST || "05:00-09:00").trim();
+const PEAK_POST_INTERVAL_MINUTES = Math.max(5, Number(process.env.PEAK_POST_INTERVAL_MINUTES || 30));
+const IST_OFFSET_MINUTES = 330;
+
+function parsePeakWindow() {
+  const m = PEAK_WINDOW_IST.match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return { start: Number(m[1]) * 60 + Number(m[2]), end: Number(m[3]) * 60 + Number(m[4]) };
+}
+
+/** Whether `now` falls inside the IST peak window. Handles windows past midnight. */
+export function isPeakWindow(now = new Date()) {
+  const w = parsePeakWindow();
+  if (!w) return false;
+  const ist = (now.getUTCHours() * 60 + now.getUTCMinutes() + IST_OFFSET_MINUTES) % 1440;
+  return w.start <= w.end ? ist >= w.start && ist < w.end : ist >= w.start || ist < w.end;
+}
+
+function currentIntervalMinutes(now = new Date()) {
+  return isPeakWindow(now) ? Math.min(PEAK_POST_INTERVAL_MINUTES, POST_INTERVAL_MINUTES) : POST_INTERVAL_MINUTES;
+}
+
 /**
  * Whether a post is too recent to publish another one.
  *
  * Used by both the long running scheduler and the one shot runner. On GitHub
  * Actions this is the only thing standing between a retried or duplicated workflow
  * run and two posts in the same minute, so it is exported rather than inlined.
+ * The spacing is tighter inside the peak window.
  */
 export function tooSoonSinceLastPost() {
   const lastPostTime = getLastPostTime();
   if (lastPostTime <= 0) return null;
+  const interval = currentIntervalMinutes();
   const elapsedMinutes = (Date.now() - lastPostTime) / (60 * 1000);
-  if (elapsedMinutes >= POST_INTERVAL_MINUTES * 0.8) return null;
-  return { elapsedMinutes, waitMins: Math.ceil(POST_INTERVAL_MINUTES - elapsedMinutes) };
+  if (elapsedMinutes >= interval * 0.8) return null;
+  return { elapsedMinutes, waitMins: Math.ceil(interval - elapsedMinutes) };
 }
 
 export function closeDb() {
@@ -491,6 +624,9 @@ export function printBanner(mode) {
   console.log("=========================================================");
   console.log("⚡ Binance Square Evidence Based Signal Bot");
   console.log(mode === "once" ? "🎯 Mode: single cycle, then exit" : `⏱️  Cron Schedule: every ${POST_INTERVAL_MINUTES} minutes (${CRON_EXPR})`);
+  if (parsePeakWindow()) {
+    console.log(`🌅 Peak window ${PEAK_WINDOW_IST} IST: every ${PEAK_POST_INTERVAL_MINUTES} minutes, trade signals first${isPeakWindow() ? "  (ACTIVE NOW)" : ""}`);
+  }
   if (DRY_RUN) console.log("🧪 DRY_RUN is set. Posts will be generated and logged but NOT published.");
   console.log("🧭 Chart grade decides the format: TRADE, WATCH or NO_TRADE");
   console.log("📊 Calls are logged and graded against real candles");
@@ -514,9 +650,27 @@ if (isEntryPoint) {
     executeRoundRobinCycle();
   }
 
-  cron.schedule(CRON_EXPR, () => {
+  // Both schedules go through the spacing guard, so where they overlap inside the
+  // peak window only one of them posts.
+  const tick = () => {
+    if (tooSoonSinceLastPost()) return;
     executeRoundRobinCycle();
-  });
+  };
+
+  cron.schedule(CRON_EXPR, tick);
+
+  const w = parsePeakWindow();
+  if (w) {
+    // Every hour the window touches, in IST. The guard inside the cycle trims the
+    // edges when the window does not start or end on the hour.
+    const hours = [];
+    const span = (w.end - w.start + 1440) % 1440 || 1440;
+    for (let m = w.start - (w.start % 60); m < w.start + span; m += 60) {
+      hours.push(Math.floor(m / 60) % 24);
+    }
+    const peakExpr = `*/${PEAK_POST_INTERVAL_MINUTES} ${[...new Set(hours)].join(",")} * * *`;
+    cron.schedule(peakExpr, () => isPeakWindow() && tick(), { timezone: "Asia/Kolkata" });
+  }
 
   process.on("SIGINT", () => {
     console.log("\n👋 Stopping Signal Bot...");
