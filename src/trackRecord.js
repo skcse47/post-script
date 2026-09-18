@@ -250,8 +250,6 @@ export function buildTrackRecordPost(stats, recentRows = []) {
   lines.push("");
   lines.push("Which one do you want broken down on the chart? 👇");
   lines.push("");
-  lines.push("Not financial advice. I post my own levels and my own mistakes.");
-  lines.push("");
   lines.push("#TradingJournal #CryptoTrading");
 
   return lines.join("\n");
@@ -297,8 +295,12 @@ function agoText(fromMs, toMs) {
  * with its levels, graded in public against what the candles actually did, linking
  * back to the unedited original. Built in code from the settled row so the model
  * cannot round a loss into a win.
+ *
+ * `nextTrade` is an optional trade block (see buildTradeBlock) for the best setup
+ * right now. A result post is where readers are most ready to act, and "I missed
+ * that one" is answered by the next one.
  */
-export function buildCallUpdatePost(call) {
+export function buildCallUpdatePost(call, { nextTrade = null } = {}) {
   if (!call) return null;
   const S = `$${call.base_asset}`;
   const r = call.result_r || 0;
@@ -329,9 +331,10 @@ export function buildCallUpdatePost(call) {
     lines.push("");
     lines.push(original);
     lines.push("");
-    lines.push(`I post the stop outs exactly like this. Tap ${S} and check the candles yourself.`);
+    lines.push(`I post the stop outs exactly like this. Tap ${S} to see where it trades now.`);
+    if (nextTrade) lines.push("", nextTrade);
     lines.push("");
-    lines.push(`Did you catch this one, or wait for a better entry?`);
+    lines.push(nextTrade ? `Did you catch ${S}, and are you taking the next one?` : `Did you catch this one, or wait for a better entry?`);
   } else {
     lines.push(`${S} stopped out ❌ ${rTxt}. Posting it like I post the wins.`);
     lines.push("");
@@ -344,15 +347,24 @@ export function buildCallUpdatePost(call) {
     lines.push(original);
     lines.push("");
     lines.push(`Tap ${S} to see exactly where it broke.`);
+    if (nextTrade) lines.push("", nextTrade);
     lines.push("");
     lines.push(`After a stop out, do you re-enter or leave the coin alone for the day?`);
   }
 
   lines.push("");
-  lines.push("Not financial advice.");
-  lines.push("");
   lines.push(`#${call.base_asset} #TradingJournal`);
   return lines.join("\n");
+}
+
+/** Coins with a call still open, so they are not signalled twice at once. */
+export function getOpenCallAssets(db) {
+  return new Set(
+    db
+      .prepare("SELECT DISTINCT base_asset FROM trade_calls WHERE status = 'OPEN'")
+      .all()
+      .map((r) => r.base_asset)
+  );
 }
 
 /** Rows closed since the last recap, newest first. */

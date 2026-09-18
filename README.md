@@ -15,29 +15,46 @@ drives reach on Square. That document is the actual point of this repo.
 1. Fetch live 24h tickers; gainers with $5M+ volume lead the queue
 2. Fetch Square's hot hashtags and the coins they name
 3. Settle any open calls against real candles (wins and losses both)
-4. If a call just hit a target or its stop: publish its CALL_UPDATE instead
-5. ~12% of the time: publish the honest track record recap instead
-6. Pick a coin, skipping cooldowns; half the time prefer one trending on Square
-7. Pull 1h + 15m klines, compute ATR, RSI, volume ratio, swing structure
-8. Grade the setup   -> TRADE | WATCH | NO_TRADE
-9. The verdict picks the format, the LLM writes it from measured numbers only
+4. Grade a shortlist (trending coins + top of the queue, minus cooldowns and
+   coins with an open call) and keep the best TRADE / WATCH setup, if any
+5. If a call just hit a target or its stop: publish its CALL_UPDATE instead,
+   with the best setup attached as the next trade
+6. ~12% of the time, outside the peak window: the track record recap instead
+7. Pick the coin: the best setup (always at peak, half the time otherwise),
+   else the rotation or a coin trending on Square
+8. Grade it   -> TRADE | WATCH | NO_TRADE; the verdict picks the format
+9. The LLM writes the words from measured numbers only; never the levels
 10. Review the draft: invented prices, cut off text, copied instruction labels.
     Retry once; never publish a post that still fails
-11. finalizePost: cashtag in the first line plus a "tap $COIN" line, data
+11. finalizePost: cashtag in the first line, the trade block (see below), data
     timestamp, 7 day record (when there are 5+ settled calls), chosen hashtags
 12. Strip promise language, publish, store the post link
-13. If levels were published, log the call so it gets graded and followed up
+13. Log whatever levels were published as a call, graded and followed up later
 ```
 
 ### What the post text is built for
 
+Square pays commission on trades placed through a cashtag, so every post is built
+to end on something a reader can act on.
+
+- **The trade block.** Built in code by `buildTradeBlock`, never by the model:
+  `🎯 $COIN entry`, stop with its % risk, TP1 to TP3, then where price is right now
+  and "Tap $COIN to trade it" (or "set a limit at ..." when price is above the zone).
+  In a signal it sits right after the two reason lines, so readers hit it fast.
+- **Every format carries one when a chart earned it.** Its own levels when the coin
+  graded TRADE or WATCH. Otherwise the best graded alternative: a pass post becomes
+  "not $ONE, the better setup is $COTI" with $COTI's levels. With nothing tradable
+  on the board, no setup is invented.
+- **No "not financial advice" line.** Square does not require it and it spent a
+  line of every post telling readers not to act. The stop and its % risk are on
+  every setup instead.
+
 - **The first line.** Square shows about two lines before "see more". Every hook
   carries the cashtag, one real number, and a reason to keep reading.
-- **Cashtag clicks.** `$COIN` sits in the hook and again in a line inviting the
-  reader to tap it and check the chart. Prices never use up Square's 2 cashtag
-  slots, and the coin the post is about always keeps its link.
+- **Cashtag slots.** Prices never use up Square's 2 cashtag slots. The coin the
+  post is about keeps its link, and the trade block coin takes the other.
 - **Hashtags.** Three at most: a hot Square hashtag only when it names this coin,
-  then `#COIN`, then a format tag. The model never writes them.
+  then `#COIN` (and the trade block coin's tag), then a format tag.
 - **Comments.** Every post ends on a question that takes one word to answer.
 
 ## Post formats

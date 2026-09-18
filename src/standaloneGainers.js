@@ -24,6 +24,7 @@ import {
   hashtagTokens,
   findRelatedHashtag,
   AUDIENCE_MIN_VOLUME_USDT,
+  buildTradeBlock,
 } from "./topGainersBot.js";
 import { buildMarketContext, gradeSetup } from "./marketContext.js";
 import {
@@ -32,6 +33,7 @@ import {
   getPendingCallUpdate,
   markCallUpdatePosted,
   buildCallUpdatePost,
+  getOpenCallAssets,
   recordCall,
   resolveOpenCalls,
   getTrackRecord,
@@ -271,13 +273,23 @@ async function tryPublishTrackRecord() {
  * losses go out the same way as the wins. Spaced so a busy day cannot turn the feed
  * into nothing but updates.
  */
-async function tryPublishCallUpdate() {
+async function tryPublishCallUpdate(nextSetup = null) {
   if (countRecentFormat("CALL_UPDATE", 3) > 0) return false;
 
   const call = getPendingCallUpdate(db, { maxAgeHours: 24 });
   if (!call) return false;
 
-  const text = buildCallUpdatePost(call);
+  // Attach the best setup right now, unless it is the same coin that just resolved.
+  const next = nextSetup && nextSetup.coin.baseAsset !== call.base_asset ? nextSetup : null;
+  const nextTrade = next
+    ? buildTradeBlock(next.coin.baseAsset, next.grade.levels, {
+        price: next.ctx?.price ?? next.coin.lastPrice,
+        half: next.grade.verdict === "WATCH",
+        intro: `Next setup I would take: $${next.coin.baseAsset}.`,
+      })
+    : null;
+
+  const text = buildCallUpdatePost(call, { nextTrade });
   if (!text) return false;
 
   console.log(`\n📝 ─── GENERATED POST [CALL_UPDATE] ───\n`);
@@ -295,6 +307,16 @@ async function tryPublishCallUpdate() {
   }
   recordPost(call.symbol, "update", call.resolved_price || 0, call.result_r || 0, text, call.base_asset, "CALL_UPDATE", false, published?.shareLink);
   markCallUpdatePosted(db, call.id);
+  if (nextTrade) {
+    recordCall(db, {
+      symbol: next.coin.symbol,
+      baseAsset: next.coin.baseAsset,
+      direction: next.grade.direction,
+      verdict: next.grade.verdict,
+      levels: next.grade.levels,
+      shareLink: published?.shareLink,
+    });
+  }
   console.log(`[track] ✅ Posted update for call #${call.id} on $${call.base_asset}: ${call.status} ${(call.result_r || 0).toFixed(1)}R`);
   return true;
 }
@@ -325,7 +347,7 @@ async function pickBestSetup(coins) {
     .sort((a, b) => rank[b.grade.verdict] - rank[a.grade.verdict] || b.grade.score - a.grade.score);
 
   console.log(
-    `[peak] Graded ${graded.length}: ${graded.map((g) => `$${g.coin.baseAsset} ${g.grade.verdict}(${g.grade.score})`).join(", ")}`
+    `[setup] Graded ${graded.length}: ${graded.map((g) => `$${g.coin.baseAsset} ${g.grade.verdict}(${g.grade.score})`).join(", ")}`
   );
   return tradable[0] || null;
 }
@@ -398,26 +420,45 @@ export async function executeRoundRobinCycle() {
       console.warn(`[track] Could not resolve open calls: ${err.message}`);
     }
 
-    // 5. A call that just hit a target or its stop gets its follow up first. Of
-    //    everything this bot posts, a public receipt is what makes the rest credible.
-    if (await tryPublishCallUpdate()) {
+    // 5. Candidates: skip coins posted recently and coins with a call still open, so
+    //    the same coin never has two live signals.
+    const cooldown = recentlyPostedAssets(Number(process.env.COIN_COOLDOWN_HOURS || 6));
+    for (const a of getOpenCallAssets(db)) cooldown.add(a);
+    const candidates = movers.queue.filter((c) => !cooldown.has(c.baseAsset));
+    const trendingSet = new Set(trendingCoins.map((c) => c.toUpperCase()));
+    const trendingPicks = movers.all
+      .filter((p) => trendingSet.has(p.baseAsset) && p.quoteVolume >= AUDIENCE_MIN_VOLUME_USDT && !cooldown.has(p.baseAsset))
+      .sort((a, b) => b.quoteVolume - a.quoteVolume);
+
+    // 6. The best tradable chart right now, from trending coins plus the top of the
+    //    queue. It is what every post points readers at: the main post during the
+    //    peak window, the "what I would trade" block on pass and lesson posts, and the
+    //    next trade on a result post. Null when nothing on the board has earned one.
+    const bestSetup = await pickBestSetup([...trendingPicks.slice(0, 2), ...candidates.slice(0, 6)]);
+    if (bestSetup) {
+      console.log(`[setup] 🎯 Best setup right now: $${bestSetup.coin.baseAsset} ${bestSetup.grade.verdict} (score ${bestSetup.grade.score}).`);
+    } else {
+      console.log(`[setup] Nothing on the shortlist grades tradable right now. No setup will be forced.`);
+    }
+
+    // 7. A call that just hit a target or its stop gets its follow up first, with the
+    //    next setup attached.
+    if (await tryPublishCallUpdate(bestSetup)) {
       return true;
     }
 
     // Inside the peak window the slots go to trade setups. Call updates above still
     // run, since a fresh receipt in front of the biggest audience is worth the slot.
     const peak = isPeakWindow();
-    if (peak) console.log(`[peak] 🌅 Inside the ${PEAK_WINDOW_IST} IST peak window, looking for a trade setup first.`);
+    if (peak) console.log(`[peak] 🌅 Inside the ${PEAK_WINDOW_IST} IST peak window, leading with the best setup.`);
 
-    // 6. Roughly once a day, post the real track record instead of another setup.
+    // 8. Roughly once a day, post the real track record instead of another setup.
     //    Receipts convert far better than another buy call, but only real ones.
     if (!peak && Math.random() < 0.12 && (await tryPublishTrackRecord())) {
       return true;
     }
 
-    // 7. Select a coin, skipping anything already posted about recently.
-    const cooldown = recentlyPostedAssets(Number(process.env.COIN_COOLDOWN_HOURS || 6));
-    const candidates = movers.queue.filter((c) => !cooldown.has(c.baseAsset));
+    // 9. Select the coin the post is about.
     const pool = candidates.length > 0 ? candidates : movers.queue;
     if (candidates.length === 0) {
       console.log("[queue] Every candidate is inside its cooldown window, reusing the full queue.");
@@ -428,30 +469,19 @@ export async function executeRoundRobinCycle() {
     const targetIndex = currentIndex % pool.length;
     let currentCoin = pool[targetIndex];
 
-    // Half the time, write about a coin Square is already talking about, if one is
-    // liquid and outside its cooldown. The post then lands where readers already are:
-    // on the coin page their feed is sending them to, and under its trending hashtag.
-    const trendingSet = new Set(trendingCoins.map((c) => c.toUpperCase()));
-    const trendingPicks = movers.all
-      .filter((p) => trendingSet.has(p.baseAsset) && p.quoteVolume >= AUDIENCE_MIN_VOLUME_USDT && !cooldown.has(p.baseAsset))
-      .sort((a, b) => b.quoteVolume - a.quoteVolume);
     let marketContext;
     let grade;
 
-    if (peak) {
-      // Grade a shortlist and take the strongest chart. A signal still needs the chart
-      // to earn it: if nothing grades TRADE or WATCH, the cycle carries on as normal
-      // and posts a pass or a lesson rather than a manufactured setup.
-      const best = await pickBestSetup([...trendingPicks.slice(0, 2), ...pool.slice(0, 6)]);
-      if (best) {
-        currentCoin = best.coin;
-        marketContext = best.ctx;
-        grade = best.grade;
-        console.log(`[peak] 🎯 Best setup: $${currentCoin.baseAsset} graded ${grade.verdict} (score ${grade.score}).`);
-      } else {
-        console.log(`[peak] No chart on the shortlist grades tradable right now. Not forcing a signal.`);
-      }
+    // Lead with the best setup always in the peak window and half the time outside
+    // it. Otherwise write about the rotation or a trending coin, and the best setup
+    // rides along as that post's trade block.
+    if (bestSetup && (peak || Math.random() < 0.5)) {
+      currentCoin = bestSetup.coin;
+      marketContext = bestSetup.ctx;
+      grade = bestSetup.grade;
     } else if (trendingPicks.length > 0 && Math.random() < 0.5) {
+      // A coin Square is already talking about: the post lands on the coin page and
+      // hashtag readers are already being sent to.
       currentCoin = trendingPicks[0];
       console.log(`[trending] 🔥 Writing about $${currentCoin.baseAsset}, which is trending on Square right now.`);
     }
@@ -462,8 +492,8 @@ export async function executeRoundRobinCycle() {
     const changeStr = `${currentCoin.priceChangePercent >= 0 ? "+" : ""}${currentCoin.priceChangePercent.toFixed(1)}%`;
     console.log(`\n🎯 [${startTime}] Selected: $${currentCoin.baseAsset} (${changeStr}) at $${formatPrice(currentCoin.lastPrice)}${coinIsTrending ? ' [TRENDING 🔥]' : ''}`);
 
-    // 8. Grade the chart. The verdict decides which kind of post gets written.
-    //    The peak shortlist has already graded the chosen coin, so reuse that.
+    // 10. Grade the chart. The verdict decides which kind of post gets written.
+    //     A coin from the shortlist is already graded, so reuse that.
     if (!grade) {
       marketContext = await buildMarketContext(currentCoin);
       grade = gradeSetup(marketContext);
@@ -490,6 +520,7 @@ export async function executeRoundRobinCycle() {
       marketContext,
       grade,
       preferSignals: peak,
+      altSetup: bestSetup,
     });
 
     const formatType = postContent.formatType || "EVIDENCE_SIGNAL";
@@ -526,18 +557,21 @@ export async function executeRoundRobinCycle() {
       );
     }
 
-    // 9. If this post published actual levels, log it as a call so it gets graded
-    //    later whether it works or not, and so its follow up can link back to it.
+    // 11. If this post published actual levels, log them as a call so they get graded
+    //     whether they work or not, and so the follow up can link back. The levels
+    //     can belong to the alternative coin rather than the one the post is about.
     if (postContent.levels?.stop && !DRY_RUN) {
+      const callCoin = postContent.callCoin || currentCoin;
+      const callGrade = postContent.callGrade || grade;
       const callId = recordCall(db, {
-        symbol: currentCoin.symbol,
-        baseAsset: currentCoin.baseAsset,
-        direction: grade.direction,
-        verdict: grade.verdict,
+        symbol: callCoin.symbol,
+        baseAsset: callCoin.baseAsset,
+        direction: callGrade.direction,
+        verdict: callGrade.verdict,
         levels: postContent.levels,
         shareLink: published?.shareLink,
       });
-      if (callId) console.log(`[track] Logged call #${callId} on $${currentCoin.baseAsset}, it will be graded against real candles.`);
+      if (callId) console.log(`[track] Logged call #${callId} on $${callCoin.baseAsset}, it will be graded against real candles.`);
     }
 
     const nextIndex = (targetIndex + 1) % pool.length;

@@ -288,10 +288,12 @@ export async function getHotTrendingHashtags(limit = 3) {
  *    so the hook is the post as far as reach is concerned. Every format gets a hook
  *    built on the cashtag plus one real number plus a reason to keep reading, and
  *    the example shapes rotate so the feed does not open the same way every hour.
- * 2. Cashtag clicks. `$SYMBOL` goes in the hook, again next to the level that
- *    matters, and in one explicit "tap $SYMBOL and check it yourself" line. A reader
- *    who is invited to verify the chart is a reader who opens the coin page.
- *    `finalizePost` enforces this in code in case the model drops it.
+ * 2. Cashtag trades. Commission is paid on trades placed through a cashtag, so
+ *    `$SYMBOL` goes in the hook and, above all, on the entry line of a concrete
+ *    setup followed by "tap $SYMBOL to trade it". That block is built in code by
+ *    `buildTradeBlock`, and non signal formats carry one too whenever a chart has
+ *    earned it (their own, or the best graded alternative). The model never writes
+ *    the levels or the call to action.
  * 3. Trust. Every number comes from real candles, the post says what would prove it
  *    wrong, and it never claims a trade that cannot be verified. Measured facts
  *    written conversationally read as a person; the old report style read as a bot.
@@ -367,16 +369,30 @@ function buildMultiFormatPrompt(coin, formatType = "EVIDENCE_SIGNAL", allMovers 
   const HOOK_RULE = `THE FIRST LINE IS EVERYTHING. Square shows only the first 2 lines before "see more".
 The first line must: contain ${S}, contain one real number from the data, and give a reason to keep reading (a tension, a contradiction, or a clear opinion). Under 90 characters. No emoji at the start. No "Hey guys", no "Let's talk about".`;
 
-  const CTA_RULE = `Include exactly one line that invites readers to check the chart themselves by tapping ${S}. Write it naturally in your own words, for example "Tap ${S} and look at the last 24 hourly candles, the level is right there." Put it right after you mention the key level.`;
+  const CTA_RULE = `Do not write any "tap ${S}" line; one is added automatically.`;
 
   // ---------------------------------------------------------------- NO_TRADE
   if (formatType === "NO_TRADE_CALL") {
-    const hooks = pickTwo([
-      `${S} is ${upDown} today and I am not touching it. One number is why.`,
-      `Everyone is looking at ${S} right now. I am sitting this one out.`,
-      `${S} looks strong on the surface. The ${ctx?.rsi1h >= 70 ? `RSI at ${ctx.rsi1h.toFixed(0)}` : "volume"} says wait.`,
-      `I almost bought ${S} today. Then I checked the ${vol ? `volume, ${vol} average` : "chart"}.`,
-    ]);
+    // When another coin graded tradable, the pass becomes a redirect: not this one,
+    // that one. The reader leaves with a trade instead of a reason not to trade.
+    const A = extras.altSymbol ? `$${extras.altSymbol}` : null;
+    const hooks = pickTwo(
+      A
+        ? [
+            `${S} is ${upDown} and I am not chasing it. The cleaner trade today is ${A}.`,
+            `Everyone is looking at ${S}. I would rather be in ${A}, and one number is why.`,
+            `Skip ${S} at this price. ${A} has the better setup right now.`,
+          ]
+        : [
+            `${S} is ${upDown} today and I am not touching it. One number is why.`,
+            `Everyone is looking at ${S} right now. I am sitting this one out.`,
+            `${S} looks strong on the surface. The ${ctx?.rsi1h >= 70 ? `RSI at ${ctx.rsi1h.toFixed(0)}` : "volume"} says wait.`,
+            `I almost bought ${S} today. Then I checked the ${vol ? `volume, ${vol} average` : "chart"}.`,
+          ]
+    );
+    const closing = A
+      ? `Then one line saying the better setup right now is on ${A} (write it as ${A}). Its levels are added automatically below that line, so do not write any.`
+      : `Then one honest line: it could keep running without you, and a bad entry costs more than a missed move.`;
 
     return `Write a Binance Square post where you publicly PASS on ${S} and explain why.
 
@@ -401,8 +417,8 @@ First line: the hook.
 Then 2 or 3 short lines: the single most important measured reason, with its number.
 Then: exactly what you need to see before this becomes a trade, with the price.
 ${CTA_RULE}
-Then one honest line: it could keep running without you, and missing a move costs nothing while a bad entry costs money.
-Last line: a question answerable in one word, like "Chasing ${S} here, or waiting for $${px(ctx?.swingLow1h ?? coin?.lowPrice)}?"
+${closing}
+Last line: a question answerable in one word, like ${A ? `"${S} or ${A}?"` : `"Chasing ${S} here, or waiting for $${px(ctx?.swingLow1h ?? coin?.lowPrice)}?"`}
 
 ${VOICE}`;
   }
@@ -422,6 +438,7 @@ ${VOICE}`;
 ${factBlock}
 
 The level to write about is $${px(key)}, the highest high of the last 24 hourly candles.
+Price is $${px(ctx?.price ?? coin?.lastPrice)}, which is ${Number.isFinite(key) && (ctx?.price ?? coin?.lastPrice) ? Math.abs(((key - (ctx?.price ?? coin.lastPrice)) / (ctx?.price ?? coin.lastPrice)) * 100).toFixed(1) : "n/a"}% ${(ctx?.price ?? coin?.lastPrice) <= key ? "below" : "above"} it. Say that distance; never say price is "testing" or "at" the level unless it is within 1%.
 The support underneath is $${px(support)}, the lowest low of the same window.
 
 ${HOOK_RULE}
@@ -433,7 +450,7 @@ FLOW:
 First line: the hook, naming $${px(key)}.
 Then one line: what an hourly close above it would mean.
 Then one line: what a rejection would mean, and that $${px(support)} is the next level down.
-Then one short line inviting readers to tap ${S} and set an alert there.
+${CTA_RULE}
 Last line: "Break or reject? 👀" or a similar one word question in your own words.
 
 No entry, no stop, no targets. This is a heads up, not a signal.
@@ -515,7 +532,7 @@ First line: the position.
 Then 3 or 4 short lines: why you hold it, and what it changes for a trader specifically.
 Then: what you are doing about it, including if the answer is nothing.
 Then: the specific thing that would prove you wrong. Do not skip this, it is what earns trust.
-${T ? `Then one line inviting readers to tap ${T} and look at the chart before deciding.` : ""}
+Do not write any "tap" line; one is added automatically.
 Last line: ask for the opposite view in a way that takes one or two words to answer.
 
 If you have no real information beyond the hashtag, write about what the topic trending tells you about attention and positioning. Never state a fact you were not given.
@@ -557,32 +574,58 @@ ${evidence || "- Momentum and volume are constructive."}
 THE RISKS, AT LEAST ONE MUST BE IN THE POST:
 ${risks || "- Any breakdown of the swing low invalidates the idea immediately."}
 
-THE LEVELS, USE THESE EXACTLY:
-Entry zone: $${px(levels?.entryLow)} to $${px(levels?.entryHigh)}
-Stop loss: $${px(levels?.stop)} (${levels?.riskPct?.toFixed(1)}% risk, under the swing low at $${px(levels?.invalidation)})
-TP1: $${px(levels?.targets?.[0])} (${levels?.targetR?.[0]}R)
-TP2: $${px(levels?.targets?.[1])} (${levels?.targetR?.[1]}R)
-TP3: $${px(levels?.targets?.[2])} (${levels?.targetR?.[2]}R)
-${levels?.notes?.length ? `Note to include: ${levels.notes.join(" ")}` : ""}
+THE LEVELS (for your understanding only, they are inserted into the post automatically):
+Entry zone $${px(levels?.entryLow)} to $${px(levels?.entryHigh)}, stop $${px(levels?.stop)} (${levels?.riskPct?.toFixed(1)}% risk, under the swing low at $${px(levels?.invalidation)}), first target ${rr}R.
+${levels?.notes?.length ? `Worth mentioning: ${levels.notes.join(" ")}` : ""}
 
 ${HOOK_RULE}
 Example hook shapes, do not copy them word for word:
 - ${hooks[0]}
 - ${hooks[1]}
 
-FLOW:
-First line: the hook.
-Then 2 or 3 short lines explaining why, each tied to a number from the evidence.
-Then the levels as a clean block, one per line, using these markers:
-🎯 Entry: ...
-🛑 Stop: ...
-✅ TP1 / TP2 / TP3: ...
-Then one line: if it closes below the stop you are out, no arguing with it.
-Then one line with a risk from the list, stated honestly.${isWatch ? " Say this is a watch, half size at most, and why." : ""}
-${CTA_RULE}
-Last line: a question answerable in one word, like "Taking it at the entry zone, or waiting for a dip?"
+WRITE EXACTLY FOUR BLOCKS, separated by one blank line, and nothing else:
+Block 1: the hook. One line.
+Block 2: why this is worth trading, 2 short lines, each tied to a number from the evidence. Keep it tight, readers need to reach the levels fast.
+Block 3: two short lines. First: if it closes below $${px(levels?.stop)} you are out, no arguing with it. Second: one risk from the list, stated plainly.${isWatch ? " Say this is half size at most, and why." : ""}
+Block 4: a question answerable in one word, like "Taking it at the entry zone, or waiting for a dip?"
+
+Do NOT write the entry, stop or targets as a list. Do NOT write "tap" lines. Both are added automatically between block 2 and block 3.
 
 ${VOICE}`;
+}
+
+/**
+ * The part of a post a reader acts on: exact levels with the cashtag on the entry
+ * line, then one line telling them where price is right now and that tapping the
+ * cashtag is how to take it.
+ *
+ * Built in code rather than by the model so the numbers are exactly the graded ones
+ * and the cashtag is always sitting where the reader's intent is highest. Square
+ * pays on trades placed through a cashtag, and nobody taps a coin tag in a post that
+ * gives them nothing to do.
+ */
+export function buildTradeBlock(symbol, levels, { price = null, half = false, intro = null } = {}) {
+  if (!symbol || !levels?.stop || !levels?.targets?.length) return null;
+  const S = `$${symbol}`;
+  const lines = [];
+  if (intro) lines.push(intro);
+  lines.push(`🎯 ${S} entry${half ? " (half size)" : ""}: $${px(levels.entryLow)} to $${px(levels.entryHigh)}`);
+  lines.push(`🛑 Stop: $${px(levels.stop)} (${levels.riskPct.toFixed(1)}% risk)`);
+  lines.push(`✅ TP1 $${px(levels.targets[0])} · TP2 $${px(levels.targets[1])} · TP3 $${px(levels.targets[2])}`);
+
+  // Truthful timing, not manufactured urgency: say where price is against the zone.
+  let action;
+  if (Number.isFinite(price) && price >= levels.entryLow && price <= levels.entryHigh) {
+    action = pick([
+      `Price is $${px(price)}, inside the entry zone right now. Tap ${S} to trade it.`,
+      `${S} is at $${px(price)}, in the zone as I post this. Tap ${S} to take the trade.`,
+    ]);
+  } else if (Number.isFinite(price) && price > levels.entryHigh) {
+    action = `Price is $${px(price)}, just above the zone. Tap ${S} and set a limit at $${px(levels.entryHigh)}.`;
+  } else {
+    action = `Tap ${S} to trade it from the entry zone.`;
+  }
+  return `${lines.join("\n")}\n\n${action}`;
 }
 
 /**
@@ -613,7 +656,7 @@ export function findRelatedHashtag(hotList, symbol) {
   return hotList.find((h) => h?.hashtag && hashtagTokens(h.hashtag).includes(sym)) || null;
 }
 
-function buildHashtags(symbol, formatType, trendingTopic, hotList) {
+function buildHashtags(symbol, formatType, trendingTopic, hotList, tradeSymbol = null) {
   const tags = [];
   if (formatType === "TRENDING_TOPIC" && trendingTopic?.hashtag) {
     tags.push(trendingTopic.hashtag);
@@ -622,6 +665,8 @@ function buildHashtags(symbol, formatType, trendingTopic, hotList) {
     if (related) tags.push(related.hashtag);
   }
   if (symbol && symbol !== "MARKET") tags.push(`#${symbol}`);
+  // The coin in the trade block gets its tag page too.
+  if (tradeSymbol && tradeSymbol !== symbol) tags.push(`#${tradeSymbol}`);
   if (FORMAT_TAGS[formatType]) tags.push(FORMAT_TAGS[formatType]);
   return [...new Set(tags)].slice(0, 3);
 }
@@ -639,11 +684,16 @@ const CASHTAG_CTA = [
  *
  * - strips any hashtags the model wrote, then appends the chosen ones
  * - guarantees the cashtag is in the first line, since that is what shows in the feed
- * - guarantees a second cashtag mention in a "check it yourself" line
+ * - inserts the trade block (levels plus "tap $COIN to trade it"): right after the
+ *   reasons in a signal, before the closing question everywhere else
+ * - without a trade block, still guarantees a second cashtag mention
  * - adds the data timestamp and track record, which only code can state truthfully
- * - adds the disclaimer once
+ *
+ * No "not financial advice" boilerplate. Square does not require it, readers skip
+ * it, and it spent a line of every post telling people not to act. The risk is
+ * stated where it is useful instead: the stop and its % on every setup.
  */
-export function finalizePost(text, { symbol, formatType, trendingTopic = null, hotList = [], trackRecord = null, now = Date.now() } = {}) {
+export function finalizePost(text, { symbol, formatType, trendingTopic = null, hotList = [], trackRecord = null, tradeBlock = null, tradeSymbol = null, now = Date.now() } = {}) {
   let body = String(text)
     .replace(/^\s*["'`]+|["'`]+\s*$/g, "")
     .replace(/(^|[ \t])#[A-Za-z][A-Za-z0-9_]*/g, "$1")
@@ -660,7 +710,7 @@ export function finalizePost(text, { symbol, formatType, trendingTopic = null, h
   // The entry / stop / target lines are exempt, so the levels block stays uniform.
   let emojiCount = 0;
   body = body.replace(/^(\p{Extended_Pictographic}️?)\s*(?=(.*))/gmu, (m, _e, rest) => {
-    if (/^(entry|stop|tp\s?\d)/i.test(rest)) return m;
+    if (/^(\$\w+\s+)?(entry|stop|tp\s?\d)/i.test(rest)) return m;
     return ++emojiCount <= 4 ? m : "";
   });
 
@@ -679,13 +729,37 @@ export function finalizePost(text, { symbol, formatType, trendingTopic = null, h
     body = lines.join("\n");
 
     const mentions = (body.match(tagRe) || []).length;
-    if (mentions < 2 && formatType !== "QUICK_TAKE") {
+    if (!tradeBlock && mentions < 2 && formatType !== "QUICK_TAKE") {
       const cta = pick(CASHTAG_CTA)(symbol);
       const blocks = body.split("\n\n");
       // Before the closing question, which is conventionally the last block.
       blocks.splice(Math.max(1, blocks.length - 1), 0, cta);
       body = blocks.join("\n\n");
     }
+  }
+
+  if (tradeBlock) {
+    // Model written "tap" lines would compete with the real call to action.
+    body = body
+      .split("\n")
+      .filter((l) => !/^\W*(tap|open|click)\s+\$[A-Za-z0-9]+/i.test(l))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n");
+    // The closing question always stays last, even when the model ran it into the
+    // previous block.
+    const lines = body.split("\n");
+    let question = null;
+    if (lines.length > 1 && /\?\s*(\p{Extended_Pictographic}️?)?\s*$/u.test(lines[lines.length - 1])) {
+      question = lines.pop();
+      body = lines.join("\n").trim();
+    }
+    const blocks = body.split("\n\n");
+    // A signal is hook, reasons, levels, then invalidation, so the reader reaches the
+    // levels within the first few lines. Anything else gets its trade at the end.
+    const at = formatType === "EVIDENCE_SIGNAL" ? Math.min(2, blocks.length) : blocks.length;
+    blocks.splice(at, 0, tradeBlock);
+    if (question) blocks.push(question);
+    body = blocks.join("\n\n");
   }
 
   const footer = [];
@@ -698,20 +772,18 @@ export function finalizePost(text, { symbol, formatType, trendingTopic = null, h
 
   const d = new Date(now);
   const stamp = `${d.getUTCDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()]} ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
-  const disclaimer = /not financial advice|\bnfa\b|\bdyor\b/i.test(body) ? "" : "Not financial advice.";
-  if (formatType !== "TRENDING_TOPIC") {
-    footer.push(`Binance data as of ${stamp}.${disclaimer ? ` ${disclaimer}` : ""}`);
-  } else if (disclaimer) {
-    footer.push(disclaimer);
+  if (formatType !== "TRENDING_TOPIC" || tradeBlock) {
+    footer.push(`Binance data as of ${stamp}.`);
   }
 
-  const tags = buildHashtags(symbol, formatType, trendingTopic, hotList);
+  const tags = buildHashtags(symbol, formatType, trendingTopic, hotList, tradeBlock ? tradeSymbol : null);
   return [body, footer.join("\n"), tags.join(" ")].filter(Boolean).join("\n\n");
 }
 
 // Shortest believable post per format. Anything shorter was cut off or refused.
 const MIN_CHARS = {
-  EVIDENCE_SIGNAL: 280,
+  // The model writes only the hook, reasons, risk and question; levels are code.
+  EVIDENCE_SIGNAL: 150,
   NO_TRADE_CALL: 220,
   TEACH: 220,
   TRENDING_TOPIC: 180,
@@ -1078,21 +1150,22 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
     // Peak window, weaker chart: mostly a half size setup, sometimes just the level.
     weightedFormats = ["EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "LEVEL_ALERT"];
   } else if (grade.verdict === "TRADE") {
+    // A chart that earned a trade gets written as one most of the time. The other
+    // formats still carry the same setup in their trade block.
     weightedFormats = [
-      "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL",
+      "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL",
       "LEVEL_ALERT",
-      "TEACH",
-      "TRENDING_TOPIC",
       "QUICK_TAKE",
     ];
   } else if (grade.verdict === "WATCH") {
+    // No pass post here: "I am not touching it" above its own trade block would
+    // contradict itself.
     weightedFormats = [
+      "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL",
       "LEVEL_ALERT", "LEVEL_ALERT",
-      "EVIDENCE_SIGNAL",
-      "TEACH", "TEACH",
+      "TEACH",
       "TRENDING_TOPIC",
       "QUICK_TAKE",
-      "NO_TRADE_CALL",
     ];
   } else {
     // Nothing tradable here. Say so, or teach instead. Never manufacture a setup
@@ -1148,7 +1221,8 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
     // A topic with no coin in it can still pull hashtag page views, but it carries no
     // cashtag at all, so nothing in it can be clicked through to a coin. Keep those to
     // roughly a third of topic posts and write about the chart the rest of the time.
-    if (!topicCoin && !options.format && Math.random() < 0.67) {
+    // With a tradable alternative the post still ends on a trade, so keep it.
+    if (!topicCoin && !options.altSetup && !options.format && Math.random() < 0.67) {
       formatType = grade.verdict === "NO_TRADE" ? "NO_TRADE_CALL" : "LEVEL_ALERT";
       trendingTopic = options.trendingTopic || null;
       console.log(`[hot-list] Topic has no coin to tag, writing ${formatType} on $${coin?.baseAsset} instead.`);
@@ -1159,7 +1233,25 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
   const targetName = formatType === "TRENDING_TOPIC" ? trendingTopic.hashtag : `$${coin?.baseAsset || "MARKET"}`;
   console.log(`[ai] Format [${formatType}] for ${targetName} (verdict: ${grade.verdict}, score: ${grade.score})`);
 
-  const prompt = buildMultiFormatPrompt(coin, formatType, allMovers, trendingTopic, grade, { topicCoin });
+  // The setup this post hands the reader, if any chart has earned one. This coin's
+  // own levels when it graded TRADE or WATCH, otherwise the best graded alternative
+  // the scheduler found. A pass post never carries its own coin's levels.
+  const ownTradable = grade.verdict !== "NO_TRADE" && grade.levels?.stop;
+  const alt = options.altSetup && options.altSetup.coin?.baseAsset !== coin?.baseAsset && options.altSetup.grade?.levels?.stop ? options.altSetup : null;
+  let action = null;
+  if (ownTradable && !["NO_TRADE_CALL", "TRENDING_TOPIC"].includes(formatType)) {
+    action = { coin, grade, ctx, alt: false };
+  } else if (formatType === "TRENDING_TOPIC" && ownTradable) {
+    action = { coin, grade, ctx, alt: true };
+  } else if (alt) {
+    action = { ...alt, alt: true };
+  }
+  if (action) console.log(`[ai] Trade block: $${action.coin.baseAsset} (${action.grade.verdict}${action.alt ? ", alternative" : ""})`);
+
+  const prompt = buildMultiFormatPrompt(coin, formatType, allMovers, trendingTopic, grade, {
+    topicCoin,
+    altSymbol: formatType === "NO_TRADE_CALL" && action?.alt ? action.coin.baseAsset : null,
+  });
 
   // Numbers are checked against whichever coin the post is actually about.
   const checkCtx =
@@ -1244,23 +1336,49 @@ RETRY. Your previous attempt was rejected because ${issues.join("; ")}. Write th
     console.warn(`[review] ❌ Post still references levels not in the data: ${result.numbers.offenders.join(", ")}`);
   }
 
+  let tradeBlock = null;
+  if (action) {
+    const a = action.coin.baseAsset;
+    const reason = action.grade.reasons?.[0] ? `${action.grade.reasons[0].replace(/\.$/, "")}.` : "";
+    let intro = null;
+    if (!action.alt && formatType !== "EVIDENCE_SIGNAL") {
+      intro = "If you want the trade:";
+    } else if (action.alt && formatType === "NO_TRADE_CALL") {
+      intro = reason ? `Why $${a}: ${reason}` : null;
+    } else if (action.alt) {
+      intro = `What I would trade right now: $${a}.${reason ? ` ${reason}` : ""}`;
+    }
+    tradeBlock = buildTradeBlock(a, action.grade.levels, {
+      price: action.ctx?.price ?? action.coin.lastPrice,
+      half: action.grade.verdict === "WATCH",
+      intro,
+    });
+  }
+
   const finalText = finalizePost(text, {
     symbol: postSymbol,
     formatType,
     trendingTopic,
     hotList: hotList || [],
     trackRecord: options.trackRecord || null,
+    tradeBlock,
+    tradeSymbol: action?.coin.baseAsset || null,
   });
 
   const out = new String(finalText);
   out.text = finalText;
   out.formatType = formatType;
-  out.primarySymbol = postSymbol;
+  // The coin this post is about keeps its cashtag link; with a trade block for
+  // another coin, that one takes Square's second slot.
+  out.primarySymbol = postSymbol || action?.coin.baseAsset || null;
   out.hashtag = trendingTopic?.hashtag || null;
   out.grade = grade;
   out.verdict = grade.verdict;
-  // Only formats that actually publish levels get logged as a call to be graded later.
-  out.levels = formatType === "EVIDENCE_SIGNAL" ? grade.levels : null;
+  // Every post that publishes levels is logged as a call and graded later, whichever
+  // coin they belong to. That is what keeps the follow ups and the record honest.
+  out.levels = tradeBlock ? action.grade.levels : null;
+  out.callCoin = tradeBlock ? action.coin : null;
+  out.callGrade = tradeBlock ? action.grade : null;
   return out;
 }
 
@@ -1318,12 +1436,7 @@ export function sanitizeForSquare(rawText, { primarySymbol = null } = {}) {
     }
   }
 
-  // 4. Disclaimer, if nothing upstream added one.
-  if (!/not financial advice|\bnfa\b|\bdyor\b/i.test(sanitized)) {
-    sanitized += "\n\nNot financial advice.";
-  }
-
-  // 5. Dashes out, line structure kept. Level blocks stay one per line.
+  // 4. Dashes out, line structure kept. Level blocks stay one per line.
   return sanitized
     .replace(/--+/g, " ")
     .replace(/\s[—–]\s/g, ". ")

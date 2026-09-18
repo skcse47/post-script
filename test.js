@@ -122,13 +122,21 @@ async function main() {
     marketContext: pick.ctx,
     grade: pick.grade,
     format: forcedFormat,
+    // The strongest other chart, which non signal posts carry as their trade block.
+    altSetup: graded
+      .filter((g) => g !== pick && g.grade.verdict !== "NO_TRADE" && g.grade.levels?.stop)
+      .sort((a, b) => b.grade.score - a.grade.score)[0],
   });
 
   // Show the text exactly as Square would receive it.
   console.log(sanitizeForSquare(post.text, { primarySymbol: post.primarySymbol }));
   console.log("\n" + line());
   console.log(`format: ${post.formatType} | verdict: ${post.verdict} | chars: ${post.text.length}`);
-  console.log(post.levels?.stop ? "This post publishes levels, so it would be logged as a gradeable call." : "No levels published, nothing logged as a call.");
+  console.log(
+    post.levels?.stop
+      ? `This post publishes levels for $${post.callCoin?.baseAsset}, so it would be logged as a gradeable call.`
+      : "No levels published, nothing logged as a call."
+  );
   console.log("Nothing was published. This is a dry run.");
 }
 
