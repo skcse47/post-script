@@ -87,6 +87,8 @@ jobs:
           COIN_COOLDOWN_HOURS: ${{ vars.COIN_COOLDOWN_HOURS || '6' }}
           PEAK_WINDOW_IST: ${{ vars.PEAK_WINDOW_IST || '05:00-09:00' }}
           PEAK_POST_INTERVAL_MINUTES: ${{ vars.PEAK_POST_INTERVAL_MINUTES || '30' }}
+          SIGNAL_SHARE: ${{ vars.SIGNAL_SHARE || '0.5' }}
+          MIN_SIGNAL_RISK_PCT: ${{ vars.MIN_SIGNAL_RISK_PCT || '1.5' }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
           FORCE_POST: ${{ inputs.force && '1' || '' }}
         run: node src/runOnce.js

@@ -395,6 +395,114 @@ function buildInvalidationOnly(ctx) {
   };
 }
 
+/**
+ * Grade a short (dump) setup: a coin that pumped hard and is already rolling over.
+ *
+ * Only real pumps qualify. Shorting something that is still printing new highs is
+ * how accounts get run over, so that counts against the setup rather than for it.
+ * Levels mirror buildLevels: the stop sits above the recent swing high, padded by
+ * half an ATR, and targets are multiples of that risk below entry.
+ */
+export function gradeShortSetup(ctx) {
+  const none = { verdict: "NO_TRADE", direction: "SHORT", score: 0, reasons: [], warnings: [], levels: null };
+  if (!ctx || !(ctx.changePct >= 15)) return none;
+
+  const reasons = [];
+  const warnings = [];
+  let score = 0;
+
+  if (ctx.changePct >= 40) {
+    score += 2;
+    reasons.push(`Up ${ctx.changePct.toFixed(0)}% in 24h, so most buyers are already in`);
+  } else {
+    score += 1;
+    reasons.push(`Up ${ctx.changePct.toFixed(0)}% in 24h`);
+  }
+
+  if (ctx.fadingFromHigh <= -3) {
+    score += 1;
+    reasons.push(`Already ${Math.abs(ctx.fadingFromHigh).toFixed(1)}% off the last hourly high`);
+  }
+  if (ctx.rangePos < 65) {
+    score += 1;
+    reasons.push(`Price has slipped back to ${ctx.rangePos.toFixed(0)}% of the 24h range`);
+  }
+  if (ctx.rsi1h !== null && ctx.rsi1h >= 75) {
+    score += 1;
+    reasons.push(`1h RSI is ${ctx.rsi1h.toFixed(0)}, deep overbought`);
+  }
+
+  if (ctx.rangePos >= 90 && ctx.fadingFromHigh > -1.5) {
+    score -= 2;
+    warnings.push(`Still trading at the highs, so shorting here is shorting strength`);
+  }
+  if (ctx.quoteVolume < 3_000_000) {
+    score -= 1;
+    warnings.push(`Only $${fmtCompact(ctx.quoteVolume)} of 24h volume`);
+  }
+
+  const verdict = score >= 3 ? "TRADE" : score >= 2 ? "WATCH" : "NO_TRADE";
+  return {
+    verdict,
+    direction: "SHORT",
+    score,
+    reasons,
+    warnings,
+    levels: verdict === "NO_TRADE" ? null : buildShortLevels(ctx),
+  };
+}
+
+function buildShortLevels(ctx) {
+  const price = ctx.price;
+  const a = ctx.atr || price * 0.02;
+
+  const structural = ctx.swingHigh15m && ctx.swingHigh15m > price ? ctx.swingHigh15m : ctx.swingHigh1h;
+  let stop = structural && structural > price ? structural + a * 0.5 : price + a * 2;
+  const maxStopDist = price * 0.12;
+  if (stop - price > maxStopDist) stop = price + maxStopDist;
+
+  const risk = stop - price;
+  const entryLow = price - a * 0.15;
+  const entryHigh = Math.min(stop - risk * 0.15, price + a * 0.6);
+  // A target can never be at or below zero; floor it at 5% of price.
+  const targets = [1.5, 2.5, 4].map((r) => Math.max(price - risk * r, price * 0.05));
+
+  return {
+    entryLow,
+    entryHigh,
+    stop,
+    riskPct: (risk / price) * 100,
+    targets,
+    targetR: [1.5, 2.5, 4],
+    invalidation: structural,
+    notes: [],
+  };
+}
+
+/**
+ * Reasons in plain words for a signal post, strongest first. Short sentences a new
+ * trader understands, each carrying its real number. Used as the fallback when the
+ * model is unavailable, and handed to the model as the facts to rephrase.
+ */
+export function plainReasons(ctx, direction = "LONG") {
+  if (!ctx) return [];
+  const out = [];
+  if (direction === "SHORT") {
+    out.push(`It pumped ${ctx.changePct.toFixed(0)}% in one day. Most buyers are already in.`);
+    if (ctx.fadingFromHigh <= -3) out.push(`Price already fell ${Math.abs(ctx.fadingFromHigh).toFixed(1)}% from the top.`);
+    if (ctx.rsi1h !== null && ctx.rsi1h >= 70) out.push(`RSI is ${ctx.rsi1h.toFixed(0)}. That is very overbought.`);
+    if (ctx.rangePos < 65) out.push(`It dropped back to the middle of today's range. Sellers are stepping in.`);
+    if (ctx.volRatio >= 1.6) out.push(`Volume is ${ctx.volRatio.toFixed(1)}x normal, so a drop can move fast.`);
+  } else {
+    if (ctx.volRatio >= 1.6) out.push(`Volume is ${ctx.volRatio.toFixed(1)}x higher than normal. Big buyers are active.`);
+    if (ctx.rangePos >= 80) out.push(`Price is holding near today's high, not falling back.`);
+    if (ctx.pctFrom7dHigh > -1.5) out.push(`It is pushing through its 7 day high.`);
+    if (ctx.rsi1h !== null && ctx.rsi1h >= 50 && ctx.rsi1h < 70) out.push(`RSI is ${ctx.rsi1h.toFixed(0)}. Strong, but not overheated yet.`);
+    if (ctx.changePct > 0) out.push(`It is up ${ctx.changePct.toFixed(0)}% today and still holding.`);
+  }
+  return out.slice(0, 3);
+}
+
 export function fmtCompact(n) {
   if (!n && n !== 0) return "0";
   if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;

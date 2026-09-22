@@ -122,10 +122,6 @@ async function main() {
     marketContext: pick.ctx,
     grade: pick.grade,
     format: forcedFormat,
-    // The strongest other chart, which non signal posts carry as their trade block.
-    altSetup: graded
-      .filter((g) => g !== pick && g.grade.verdict !== "NO_TRADE" && g.grade.levels?.stop)
-      .sort((a, b) => b.grade.score - a.grade.score)[0],
   });
 
   // Show the text exactly as Square would receive it.

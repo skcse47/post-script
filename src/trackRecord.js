@@ -102,8 +102,13 @@ export async function resolveOpenCalls(db, { maxAgeHours = 48 } = {}) {
       // When the deciding candle closed, so the update post can say when it happened.
       let hitAt = null;
 
-      const risk = call.entry - call.stop;
-      const rOf = (target) => (risk > 0 ? (target - call.entry) / risk : 0);
+      // Shorts are the mirror image: the stop is above, targets below, and a candle's
+      // high hits the stop while its low hits a target.
+      const isShort = call.direction === "SHORT";
+      const risk = isShort ? call.stop - call.entry : call.entry - call.stop;
+      const rOf = (target) => (risk > 0 ? (isShort ? call.entry - target : target - call.entry) / risk : 0);
+      const hitsStop = (c) => (isShort ? c.high >= call.stop : c.low <= call.stop);
+      const hits = (c, t) => (isShort ? c.low <= t : c.high >= t);
 
       // Best target reached so far. Once TP1 is tagged a real trader takes partials
       // and moves the stop to entry, so a later stop no longer counts as a full loss.
@@ -113,7 +118,7 @@ export async function resolveOpenCalls(db, { maxAgeHours = 48 } = {}) {
         // Stop wins ties. We cannot see intra-candle sequence, so when a candle spans
         // both the stop and a target we resolve against ourselves rather than
         // inflating the record.
-        if (c.low <= call.stop) {
+        if (hitsStop(c)) {
           if (bestTier === 0) {
             status = "STOPPED";
             resultR = -1;
@@ -122,7 +127,7 @@ export async function resolveOpenCalls(db, { maxAgeHours = 48 } = {}) {
           }
           break;
         }
-        if (c.high >= call.tp3) {
+        if (hits(c, call.tp3)) {
           bestTier = 3;
           status = "TP3";
           resultR = rOf(call.tp3);
@@ -130,13 +135,13 @@ export async function resolveOpenCalls(db, { maxAgeHours = 48 } = {}) {
           hitAt = c.closeTime;
           break;
         }
-        if (c.high >= call.tp2 && bestTier < 2) {
+        if (hits(c, call.tp2) && bestTier < 2) {
           bestTier = 2;
           status = "TP2";
           resultR = rOf(call.tp2);
           price = call.tp2;
           hitAt = c.closeTime;
-        } else if (c.high >= call.tp1 && bestTier < 1) {
+        } else if (hits(c, call.tp1) && bestTier < 1) {
           bestTier = 1;
           status = "TP1";
           resultR = rOf(call.tp1);
@@ -149,7 +154,7 @@ export async function resolveOpenCalls(db, { maxAgeHours = 48 } = {}) {
       if (!status && ageHours >= maxAgeHours) {
         const last = since[since.length - 1].close;
         status = "EXPIRED";
-        resultR = risk > 0 ? (last - call.entry) / risk : 0;
+        resultR = rOf(last);
         price = last;
       }
 

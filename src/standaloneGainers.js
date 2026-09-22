@@ -26,7 +26,7 @@ import {
   AUDIENCE_MIN_VOLUME_USDT,
   buildTradeBlock,
 } from "./topGainersBot.js";
-import { buildMarketContext, gradeSetup } from "./marketContext.js";
+import { buildMarketContext, gradeSetup, gradeShortSetup } from "./marketContext.js";
 import {
   TRADE_CALLS_SCHEMA,
   migrateTradeCalls,
@@ -284,7 +284,7 @@ async function tryPublishCallUpdate(nextSetup = null) {
   const nextTrade = next
     ? buildTradeBlock(next.coin.baseAsset, next.grade.levels, {
         price: next.ctx?.price ?? next.coin.lastPrice,
-        half: next.grade.verdict === "WATCH",
+        direction: next.grade.direction,
         intro: `Next setup I would take: $${next.coin.baseAsset}.`,
       })
     : null;
@@ -322,34 +322,58 @@ async function tryPublishCallUpdate(nextSetup = null) {
 }
 
 /**
- * Grade each coin and return the strongest tradable one, or null.
+ * Grade each coin both ways, long and short, and return the strongest tradable
+ * setup, or null.
  *
- * TRADE beats WATCH, then the higher score wins. Coins with no candle data or a
- * NO_TRADE grade are never returned, which is what keeps the peak window from
- * turning into a stream of forced buy calls.
+ * TRADE beats WATCH, then the higher score wins. Shorts matter here: the board is
+ * mostly coins that already pumped, which rarely grade as a good long but often do
+ * as a fade. NO_TRADE is never returned, so a signal slot is never filled with a
+ * forced call.
  */
 async function pickBestSetup(coins) {
   const seen = new Set();
   const unique = coins.filter((c) => c && !seen.has(c.baseAsset) && seen.add(c.baseAsset));
 
-  const graded = await Promise.all(
-    unique.map(async (coin) => {
-      const ctx = await buildMarketContext(coin);
-      const grade = gradeSetup(ctx);
-      grade.ctx = ctx;
-      return { coin, ctx, grade };
-    })
-  );
+  const graded = (
+    await Promise.all(
+      unique.map(async (coin) => {
+        const ctx = await buildMarketContext(coin);
+        return [gradeSetup(ctx), gradeShortSetup(ctx)].map((grade) => {
+          grade.ctx = ctx;
+          return { coin, ctx, grade };
+        });
+      })
+    )
+  ).flat();
 
   const rank = { TRADE: 2, WATCH: 1 };
   const tradable = graded
-    .filter((g) => rank[g.grade.verdict] && g.grade.levels?.stop)
+    // A 0.3% stop means a 0.5% first target, which is no reason to open a trade.
+    // Tokenized stocks and sleepy large caps land here; skip them.
+    .filter((g) => rank[g.grade.verdict] && g.grade.levels?.stop && g.grade.levels.riskPct >= MIN_SIGNAL_RISK_PCT)
     .sort((a, b) => rank[b.grade.verdict] - rank[a.grade.verdict] || b.grade.score - a.grade.score);
 
+  const shown = tradable.length ? tradable : graded.filter((g) => g.grade.direction !== "SHORT");
   console.log(
-    `[setup] Graded ${graded.length}: ${graded.map((g) => `$${g.coin.baseAsset} ${g.grade.verdict}(${g.grade.score})`).join(", ")}`
+    `[setup] Graded ${unique.length} coins: ${shown.map((g) => `$${g.coin.baseAsset} ${g.grade.direction === "SHORT" ? "short" : "long"} ${g.grade.verdict}(${g.grade.score})`).join(", ")}`
   );
   return tradable[0] || null;
+}
+
+/**
+ * Share of recent posts that were trade signals. Call updates and recaps are left
+ * out: they are neither signals nor the content posts signals alternate with.
+ */
+function recentSignalShare(n = 10) {
+  const rows = db
+    .prepare(
+      `SELECT format_type FROM post_history
+       WHERE format_type NOT IN ('', 'CALL_UPDATE', 'TRACK_RECORD')
+       ORDER BY id DESC LIMIT ?`
+    )
+    .all(n);
+  if (rows.length === 0) return 0;
+  return rows.filter((r) => r.format_type === "EVIDENCE_SIGNAL").length / rows.length;
 }
 
 // ─── Main Execution Pipeline ─────────────────────────────────────────────────
@@ -434,9 +458,9 @@ export async function executeRoundRobinCycle() {
     //    queue. It is what every post points readers at: the main post during the
     //    peak window, the "what I would trade" block on pass and lesson posts, and the
     //    next trade on a result post. Null when nothing on the board has earned one.
-    const bestSetup = await pickBestSetup([...trendingPicks.slice(0, 2), ...candidates.slice(0, 6)]);
+    const bestSetup = await pickBestSetup([...trendingPicks.slice(0, 2), ...candidates.slice(0, 10)]);
     if (bestSetup) {
-      console.log(`[setup] 🎯 Best setup right now: $${bestSetup.coin.baseAsset} ${bestSetup.grade.verdict} (score ${bestSetup.grade.score}).`);
+      console.log(`[setup] 🎯 Best setup right now: ${bestSetup.coin.baseAsset} ${bestSetup.grade.direction} ${bestSetup.grade.verdict} (score ${bestSetup.grade.score}).`);
     } else {
       console.log(`[setup] Nothing on the shortlist grades tradable right now. No setup will be forced.`);
     }
@@ -447,14 +471,20 @@ export async function executeRoundRobinCycle() {
       return true;
     }
 
-    // Inside the peak window the slots go to trade setups. Call updates above still
-    // run, since a fresh receipt in front of the biggest audience is worth the slot.
+    // Is this slot a trade signal? Every slot in the peak window, and otherwise
+    // whenever signals are below SIGNAL_SHARE of recent posts, which alternates
+    // signal / other at the default 0.5. A slot only becomes a signal if a chart
+    // earned one; with nothing tradable it falls back to a normal post.
     const peak = isPeakWindow();
-    if (peak) console.log(`[peak] 🌅 Inside the ${PEAK_WINDOW_IST} IST peak window, leading with the best setup.`);
+    const share = recentSignalShare();
+    const signalSlot = peak || share < SIGNAL_SHARE;
+    console.log(
+      `[slot] ${signalSlot ? "📈 Signal slot" : "📝 Content slot"} (${(share * 100).toFixed(0)}% of recent posts were signals, target ${(SIGNAL_SHARE * 100).toFixed(0)}%${peak ? ", peak window" : ""})`
+    );
+    if (signalSlot && !bestSetup) console.log(`[slot] No chart earned a signal right now, writing a normal post instead.`);
 
-    // 8. Roughly once a day, post the real track record instead of another setup.
-    //    Receipts convert far better than another buy call, but only real ones.
-    if (!peak && Math.random() < 0.12 && (await tryPublishTrackRecord())) {
+    // 8. Roughly once a day, post the real track record instead of a content post.
+    if (!signalSlot && Math.random() < 0.12 && (await tryPublishTrackRecord())) {
       return true;
     }
 
@@ -472,10 +502,10 @@ export async function executeRoundRobinCycle() {
     let marketContext;
     let grade;
 
-    // Lead with the best setup always in the peak window and half the time outside
-    // it. Otherwise write about the rotation or a trending coin, and the best setup
-    // rides along as that post's trade block.
-    if (bestSetup && (peak || Math.random() < 0.5)) {
+    // A signal slot goes to the best setup. A content slot writes about the rotation
+    // or a coin trending on Square, with no levels.
+    const isSignal = signalSlot && Boolean(bestSetup);
+    if (isSignal) {
       currentCoin = bestSetup.coin;
       marketContext = bestSetup.ctx;
       grade = bestSetup.grade;
@@ -519,8 +549,7 @@ export async function executeRoundRobinCycle() {
       trackRecord: getTrackRecord(db, { days: 7, minCalls: 5 }),
       marketContext,
       grade,
-      preferSignals: peak,
-      altSetup: bestSetup,
+      ...(isSignal ? { format: "EVIDENCE_SIGNAL" } : { noSignal: true }),
     });
 
     const formatType = postContent.formatType || "EVIDENCE_SIGNAL";
@@ -611,6 +640,15 @@ const CRON_EXPR =
 // PEAK_WINDOW_IST=HH:MM-HH:MM, or set it to "off".
 const PEAK_WINDOW_IST = (process.env.PEAK_WINDOW_IST || "05:00-09:00").trim();
 const PEAK_POST_INTERVAL_MINUTES = Math.max(5, Number(process.env.PEAK_POST_INTERVAL_MINUTES || 30));
+
+// Share of posts that are trade signals (entry, stop loss, targets). The rest are
+// content posts with no levels, which keeps the signals standing out in the feed.
+// Every slot inside the peak window is a signal slot on top of this.
+const SIGNAL_SHARE = Math.min(1, Math.max(0, Number(process.env.SIGNAL_SHARE ?? 0.5)));
+
+// Smallest distance to the stop for a signal. Targets are 1.5x, 2.5x and 4x this,
+// so 1.5% puts Target 1 at roughly +2%.
+const MIN_SIGNAL_RISK_PCT = Math.max(0, Number(process.env.MIN_SIGNAL_RISK_PCT ?? 1.5));
 const IST_OFFSET_MINUTES = 330;
 
 function parsePeakWindow() {

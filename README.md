@@ -15,53 +15,71 @@ drives reach on Square. That document is the actual point of this repo.
 1. Fetch live 24h tickers; gainers with $5M+ volume lead the queue
 2. Fetch Square's hot hashtags and the coins they name
 3. Settle any open calls against real candles (wins and losses both)
-4. Grade a shortlist (trending coins + top of the queue, minus cooldowns and
-   coins with an open call) and keep the best TRADE / WATCH setup, if any
+4. Grade a shortlist (2 trending coins + 10 from the queue, minus cooldowns and
+   coins with an open call) both ways, LONG and SHORT, and keep the best
+   TRADE / WATCH setup with at least MIN_SIGNAL_RISK_PCT to the stop
 5. If a call just hit a target or its stop: publish its CALL_UPDATE instead,
    with the best setup attached as the next trade
-6. ~12% of the time, outside the peak window: the track record recap instead
-7. Pick the coin: the best setup (always at peak, half the time otherwise),
-   else the rotation or a coin trending on Square
-8. Grade it   -> TRADE | WATCH | NO_TRADE; the verdict picks the format
+6. Decide the slot: SIGNAL if signals are under SIGNAL_SHARE of the last 10
+   posts (or inside the peak window) and a setup exists, else CONTENT
+7. CONTENT slots only: ~12% of the time, the track record recap instead
+8. SIGNAL: the best setup, as EVIDENCE_SIGNAL. CONTENT: the rotation or a coin
+   trending on Square, as a level alert, lesson, trend take, quick take or pass,
+   with no levels
 9. The LLM writes the words from measured numbers only; never the levels
 10. Review the draft: invented prices, cut off text, copied instruction labels.
-    Retry once; never publish a post that still fails
-11. finalizePost: cashtag in the first line, the trade block (see below), data
-    timestamp, 7 day record (when there are 5+ settled calls), chosen hashtags
-12. Strip promise language, publish, store the post link
-13. Log whatever levels were published as a call, graded and followed up later
+    Retry once; a signal falls back to plain reasons from code instead
+11. Strip promise language, publish, store the post link
+12. Log the signal's levels as a call, graded and followed up later
 ```
 
-### What the post text is built for
+### The signal post
 
-Square pays commission on trades placed through a cashtag, so every post is built
-to end on something a reader can act on.
+Half the posts, by default. Built for a reader to act on in a few seconds:
 
-- **The trade block.** Built in code by `buildTradeBlock`, never by the model:
-  `🎯 $COIN entry`, stop with its % risk, TP1 to TP3, then where price is right now
-  and "Tap $COIN to trade it" (or "set a limit at ..." when price is above the zone).
-  In a signal it sits right after the two reason lines, so readers hit it fast.
-- **Every format carries one when a chart earned it.** Its own levels when the coin
-  graded TRADE or WATCH. Otherwise the best graded alternative: a pass post becomes
-  "not $ONE, the better setup is $COTI" with $COTI's levels. With nothing tradable
-  on the board, no setup is invented.
-- **No "not financial advice" line.** Square does not require it and it spent a
-  line of every post telling readers not to act. The stop and its % risk are on
-  every setup instead.
+```
+$MUBARAK looks ready to drop from here 📉
+
+Why it can dump:
+• It pumped 55.0% today so buyers are tapped out
+• RSI is at 76 which means it is very overbought
+
+🎯 Short $MUBARAK at: $0.05823 to $0.06087
+🛑 Stop loss: $0.06341
+✅ Target 1: $0.05179
+✅ Target 2: $0.04715
+✅ Target 3: $0.04018
+
+Price is in the zone now. Tap $MUBARAK to open a short.
+
+Shorting this one? 👇
+```
+
+- **Reason first, in plain words.** The model rewrites the measured reasons
+  (`plainReasons`) for a new trader: no "liquidity", "structure", R multiples.
+- **Levels and call to action in code** (`buildSignalPost`, `buildTradeBlock`), so
+  they are exact. The cashtag sits on the buy / short line and in "Tap $COIN to
+  buy". The "in the zone now" line is true at the moment of posting.
+- **Long and short.** Most of the board already pumped; those rarely make good
+  longs but often make good fades (`gradeShortSetup`). Settlement grades shorts the
+  right way round. Note that a short needs futures, not spot.
+- **Content posts carry no levels**, so the signals stand out in the feed.
+- **No "not financial advice" line.** Square does not require it and it cost a line
+  of every post. The stop loss on every signal does the real job.
 
 - **The first line.** Square shows about two lines before "see more". Every hook
   carries the cashtag, one real number, and a reason to keep reading.
-- **Cashtag slots.** Prices never use up Square's 2 cashtag slots. The coin the
-  post is about keeps its link, and the trade block coin takes the other.
+- **Cashtag slots.** Prices never use up Square's 2 cashtag slots, and the coin
+  the post is about always keeps its link.
 - **Hashtags.** Three at most: a hot Square hashtag only when it names this coin,
-  then `#COIN` (and the trade block coin's tag), then a format tag.
+  then `#COIN`, then a format tag (`#TradingSignals` on signals).
 - **Comments.** Every post ends on a question that takes one word to answer.
 
 ## Post formats
 
 | Format | When | What it does |
 |---|---|---|
-| `EVIDENCE_SIGNAL` | TRADE / WATCH | Setup with structure based levels, real R:R, stated invalidation and risks |
+| `EVIDENCE_SIGNAL` | signal slot | Long or short. Plain reasons first, then buy / short zone, stop loss, 3 targets, "Tap $COIN to buy" |
 | `NO_TRADE_CALL` | NO_TRADE | Publicly passes on the coin and says which number stopped it |
 | `LEVEL_ALERT` | any | One level, what a break means, what a failure means. Short |
 | `TEACH` | any | One lesson worked through on the live chart |
@@ -109,6 +127,8 @@ DRY_RUN=1 npm start
 | `COIN_COOLDOWN_HOURS` | 6 | Before the same ticker can repeat |
 | `PEAK_WINDOW_IST` | 05:00-09:00 | Best reach window. Inside it: shorter spacing, the strongest chart from a graded shortlist, written as a signal. `off` disables |
 | `PEAK_POST_INTERVAL_MINUTES` | 30 | Spacing inside the peak window. The workflow cron adds :30 runs to match |
+| `SIGNAL_SHARE` | 0.5 | Share of posts that are trade signals. Every peak window slot is a signal slot on top |
+| `MIN_SIGNAL_RISK_PCT` | 1.5 | Smallest % to the stop for a signal. Filters out setups whose targets are too small to matter |
 | `LLM_PROVIDER` | gemini | `gemini` or `openrouter` |
 | `LLM_MODEL` | gemini-flash-lite-latest | See the quota note below before changing this |
 | `DRY_RUN` | unset | `DRY_RUN=1` generates and logs posts but publishes nothing and writes nothing to the database |

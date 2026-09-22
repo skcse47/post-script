@@ -7,7 +7,7 @@
  * with dynamic catchy opening hooks, explicit dollar price levels, and clickable coin cashtags ($BTC, $SOL, etc.).
  */
 
-import { buildMarketContext, gradeSetup, fmtCompact } from "./marketContext.js";
+import { buildMarketContext, gradeSetup, fmtCompact, plainReasons } from "./marketContext.js";
 
 const BINANCE_TICKER_URLS = [
   "https://data-api.binance.vision/api/v3/ticker/24hr",
@@ -373,26 +373,12 @@ The first line must: contain ${S}, contain one real number from the data, and gi
 
   // ---------------------------------------------------------------- NO_TRADE
   if (formatType === "NO_TRADE_CALL") {
-    // When another coin graded tradable, the pass becomes a redirect: not this one,
-    // that one. The reader leaves with a trade instead of a reason not to trade.
-    const A = extras.altSymbol ? `$${extras.altSymbol}` : null;
-    const hooks = pickTwo(
-      A
-        ? [
-            `${S} is ${upDown} and I am not chasing it. The cleaner trade today is ${A}.`,
-            `Everyone is looking at ${S}. I would rather be in ${A}, and one number is why.`,
-            `Skip ${S} at this price. ${A} has the better setup right now.`,
-          ]
-        : [
-            `${S} is ${upDown} today and I am not touching it. One number is why.`,
-            `Everyone is looking at ${S} right now. I am sitting this one out.`,
-            `${S} looks strong on the surface. The ${ctx?.rsi1h >= 70 ? `RSI at ${ctx.rsi1h.toFixed(0)}` : "volume"} says wait.`,
-            `I almost bought ${S} today. Then I checked the ${vol ? `volume, ${vol} average` : "chart"}.`,
-          ]
-    );
-    const closing = A
-      ? `Then one line saying the better setup right now is on ${A} (write it as ${A}). Its levels are added automatically below that line, so do not write any.`
-      : `Then one honest line: it could keep running without you, and a bad entry costs more than a missed move.`;
+    const hooks = pickTwo([
+      `${S} is ${upDown} today and I am not touching it. One number is why.`,
+      `Everyone is looking at ${S} right now. I am sitting this one out.`,
+      `${S} looks strong on the surface. The ${ctx?.rsi1h >= 70 ? `RSI at ${ctx.rsi1h.toFixed(0)}` : "volume"} says wait.`,
+      `I almost bought ${S} today. Then I checked the ${vol ? `volume, ${vol} average` : "chart"}.`,
+    ]);
 
     return `Write a Binance Square post where you publicly PASS on ${S} and explain why.
 
@@ -417,8 +403,8 @@ First line: the hook.
 Then 2 or 3 short lines: the single most important measured reason, with its number.
 Then: exactly what you need to see before this becomes a trade, with the price.
 ${CTA_RULE}
-${closing}
-Last line: a question answerable in one word, like ${A ? `"${S} or ${A}?"` : `"Chasing ${S} here, or waiting for $${px(ctx?.swingLow1h ?? coin?.lowPrice)}?"`}
+Then one honest line: it could keep running without you, and a bad entry costs more than a missed move.
+Last line: a question answerable in one word, like "Chasing ${S} here, or waiting for ${px(ctx?.swingLow1h ?? coin?.lowPrice)}?"
 
 ${VOICE}`;
   }
@@ -555,77 +541,129 @@ ${VOICE}`;
   }
 
   // --------------------------------------------------------- EVIDENCE_SIGNAL
-  const isWatch = grade?.verdict === "WATCH";
-  const rr = levels?.targetR?.[0] || 1.5;
-  const hooks = pickTwo([
-    `${S} is ${upDown} on ${vol || "rising"} volume, and it is still holding the highs.`,
-    `I only take a trade when I know where I am wrong. On ${S} that is $${px(levels?.stop)}.`,
-    `${S} is giving a clean ${rr}R setup. Risk is ${levels?.riskPct?.toFixed(1)}%, and the stop is under a real swing low.`,
-    `${S} volume is ${vol || "well above"} its weekly average. Here is the level I am watching.`,
-  ]);
+  // The model writes only the headline and the reasons, in plain words. The levels,
+  // the call to action and the closing question are assembled in code by
+  // buildSignalPost, so they are exact and identical in shape every time.
+  const isShort = grade?.direction === "SHORT";
+  const facts = (extras.reasons || []).map((r) => `- ${r}`).join("\n");
 
-  return `Write a Binance Square post presenting a ${isWatch ? "tentative, half size" : "clean"} long setup on ${S}.
+  return `Write the opening of a crypto trade signal for ${S}.
+Direction: ${isShort ? "SHORT. The price can DROP from here." : "LONG. The price can GO UP from here."}
 
 ${factBlock}
 
-THE EVIDENCE THAT SUPPORTS IT:
-${evidence || "- Momentum and volume are constructive."}
+THE REASONS (true, measured; rewrite them in very simple words):
+${facts || evidence || "- Volume and price action support the move."}
 
-THE RISKS, AT LEAST ONE MUST BE IN THE POST:
-${risks || "- Any breakdown of the swing low invalidates the idea immediately."}
+WRITE EXACTLY THIS, nothing else:
+Line 1: a headline of at most 9 words that contains ${S} and says it looks ready to ${isShort ? "drop" : "go up"}. End with ${isShort ? "📉" : "📈"}.
+Then 2 or 3 lines, each starting with "• ". Each line is ONE reason with its real number, at most 12 words.
 
-THE LEVELS (for your understanding only, they are inserted into the post automatically):
-Entry zone $${px(levels?.entryLow)} to $${px(levels?.entryHigh)}, stop $${px(levels?.stop)} (${levels?.riskPct?.toFixed(1)}% risk, under the swing low at $${px(levels?.invalidation)}), first target ${rr}R.
-${levels?.notes?.length ? `Worth mentioning: ${levels.notes.join(" ")}` : ""}
-
-${HOOK_RULE}
-Example hook shapes, do not copy them word for word:
-- ${hooks[0]}
-- ${hooks[1]}
-
-WRITE EXACTLY FOUR BLOCKS, separated by one blank line, and nothing else:
-Block 1: the hook. One line.
-Block 2: why this is worth trading, 2 short lines, each tied to a number from the evidence. Keep it tight, readers need to reach the levels fast.
-Block 3: two short lines. First: if it closes below $${px(levels?.stop)} you are out, no arguing with it. Second: one risk from the list, stated plainly.${isWatch ? " Say this is half size at most, and why." : ""}
-Block 4: a question answerable in one word, like "Taking it at the entry zone, or waiting for a dip?"
-
-Do NOT write the entry, stop or targets as a list. Do NOT write "tap" lines. Both are added automatically between block 2 and block 3.
-
-${VOICE}`;
+RULES:
+- Words a 12 year old understands. Say "buyers", "sellers", "volume", "today's high". Never "liquidity", "structure", "confluence", "distribution", "momentum shift".
+- Use only numbers from the data above. Never invent one.
+- Say "can" or "looks ready". Never "will", "guaranteed", "100%", "moon".
+- Write the coin as ${S}. No hashtags, no entry, no stop, no targets, no question. Those are added automatically.
+- No dashes of any kind.
+- Output only those lines.`;
 }
 
 /**
- * The part of a post a reader acts on: exact levels with the cashtag on the entry
- * line, then one line telling them where price is right now and that tapping the
- * cashtag is how to take it.
- *
- * Built in code rather than by the model so the numbers are exactly the graded ones
- * and the cashtag is always sitting where the reader's intent is highest. Square
- * pays on trades placed through a cashtag, and nobody taps a coin tag in a post that
- * gives them nothing to do.
+ * The levels and the call to action, built in code so the numbers are exactly the
+ * graded ones. The cashtag sits on the buy (or short) line, where the reader's intent
+ * is highest, and again in "Tap $COIN to buy". One level per line, plain labels, no
+ * trader shorthand like R multiples: it has to read at a glance.
  */
-export function buildTradeBlock(symbol, levels, { price = null, half = false, intro = null } = {}) {
+export function buildTradeBlock(symbol, levels, { price = null, direction = "LONG", intro = null } = {}) {
   if (!symbol || !levels?.stop || !levels?.targets?.length) return null;
   const S = `$${symbol}`;
+  const short = direction === "SHORT";
   const lines = [];
   if (intro) lines.push(intro);
-  lines.push(`🎯 ${S} entry${half ? " (half size)" : ""}: $${px(levels.entryLow)} to $${px(levels.entryHigh)}`);
-  lines.push(`🛑 Stop: $${px(levels.stop)} (${levels.riskPct.toFixed(1)}% risk)`);
-  lines.push(`✅ TP1 $${px(levels.targets[0])} · TP2 $${px(levels.targets[1])} · TP3 $${px(levels.targets[2])}`);
+  lines.push(`🎯 ${short ? "Short" : "Buy"} ${S} at: $${px(levels.entryLow)} to $${px(levels.entryHigh)}`);
+  lines.push(`🛑 Stop loss: $${px(levels.stop)}`);
+  levels.targets.forEach((t, i) => lines.push(`✅ Target ${i + 1}: $${px(t)}`));
 
-  // Truthful timing, not manufactured urgency: say where price is against the zone.
+  // Where price is right now against the zone. True at the moment of posting, which
+  // is the only kind of urgency worth using.
+  const inZone = Number.isFinite(price) && price >= levels.entryLow && price <= levels.entryHigh;
   let action;
-  if (Number.isFinite(price) && price >= levels.entryLow && price <= levels.entryHigh) {
-    action = pick([
-      `Price is $${px(price)}, inside the entry zone right now. Tap ${S} to trade it.`,
-      `${S} is at $${px(price)}, in the zone as I post this. Tap ${S} to take the trade.`,
-    ]);
-  } else if (Number.isFinite(price) && price > levels.entryHigh) {
-    action = `Price is $${px(price)}, just above the zone. Tap ${S} and set a limit at $${px(levels.entryHigh)}.`;
+  if (short) {
+    if (inZone || !Number.isFinite(price)) action = `Price is in the zone now. Tap ${S} to open a short.`;
+    else if (price < levels.entryLow) action = `Price is just below the zone. Tap ${S} and set a short limit at $${px(levels.entryLow)}.`;
+    else action = `Tap ${S} to open a short from the zone.`;
   } else {
-    action = `Tap ${S} to trade it from the entry zone.`;
+    if (inZone || !Number.isFinite(price)) action = pick([`Price is in the buy zone now. Tap ${S} to buy.`, `${S} is in the buy zone right now. Tap ${S} to buy.`]);
+    else if (price > levels.entryHigh) action = `Price is just above the zone. Tap ${S} and set a buy limit at $${px(levels.entryHigh)}.`;
+    else action = `Tap ${S} to buy from the zone.`;
   }
   return `${lines.join("\n")}\n\n${action}`;
+}
+
+const SIGNAL_QUESTIONS = {
+  LONG: ["Are you buying this one? 👇", "In or out? 👇", "Taking this trade? Yes or no 👇"],
+  SHORT: ["Shorting this one? 👇", "In or out? 👇", "Taking this short? Yes or no 👇"],
+};
+
+const SIGNAL_HEADLINES = {
+  LONG: [(s) => `${s} looks ready to go higher 📈`, (s) => `${s} is setting up for a move up 📈`, (s) => `Buyers are stepping into ${s} 📈`],
+  SHORT: [(s) => `${s} looks ready to drop 📉`, (s) => `${s} is running out of buyers 📉`, (s) => `${s} pumped too far, a pullback looks close 📉`],
+};
+
+/**
+ * Parse the model's headline and reasons. Returns null when the shape is wrong, so
+ * the caller can retry or fall back to the plain reasons from code.
+ */
+export function parseSignalIntro(text, symbol) {
+  const lines = String(text || "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((l) => !/^#/.test(l));
+  if (lines.length < 3) return null;
+  const headline = lines[0].replace(/^["'*]+|["'*]+$/g, "").trim();
+  const reasons = lines
+    .slice(1)
+    .filter((l) => /^[•\-*·]\s*/.test(l))
+    .map((l) => l.replace(/^[•\-*·]\s*/, "").trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  if (!headline || headline.length > 90 || reasons.length < 2) return null;
+  if (reasons.some((r) => r.length > 110)) return null;
+  return { headline, reasons };
+}
+
+/**
+ * The whole signal post:
+ *
+ *   headline with the cashtag
+ *   Why it can pump / dump: two or three reasons
+ *   buy zone, stop loss, three targets
+ *   where price is now, "Tap $COIN to buy"
+ *   a yes or no question
+ *   the 7 day record, when there is enough of one
+ *   hashtags
+ */
+export function buildSignalPost({ symbol, direction = "LONG", intro, levels, price, trackRecord = null, hashtags = [] }) {
+  const S = `$${symbol}`;
+  const dir = direction === "SHORT" ? "SHORT" : "LONG";
+  let headline = intro?.headline || pick(SIGNAL_HEADLINES[dir])(S);
+  if (!new RegExp(`\\$${symbol}\\b`, "i").test(headline)) {
+    const bare = new RegExp(`(^|[^$A-Za-z0-9])(${symbol})\\b`, "i");
+    headline = bare.test(headline) ? headline.replace(bare, (_, pre) => `${pre}${S}`) : `${S}: ${headline}`;
+  }
+
+  const parts = [
+    headline,
+    `${dir === "SHORT" ? "Why it can dump:" : "Why it can pump:"}\n${intro.reasons.map((r) => `• ${r}`).join("\n")}`,
+    buildTradeBlock(symbol, levels, { price, direction: dir }),
+    pick(SIGNAL_QUESTIONS[dir]),
+  ];
+  if (trackRecord) {
+    parts.push(`📒 My last ${trackRecord.days} days: ${trackRecord.wins} hit target, ${trackRecord.stopped} hit stop. Losses included.`);
+  }
+  if (hashtags.length) parts.push(hashtags.join(" "));
+  return parts.join("\n\n");
 }
 
 /**
@@ -636,7 +674,7 @@ export function buildTradeBlock(symbol, levels, { price = null, half = false, in
  * readers who bounce. The coin tag always goes in. The last slot is a format tag.
  */
 const FORMAT_TAGS = {
-  EVIDENCE_SIGNAL: "#TradingSetup",
+  EVIDENCE_SIGNAL: "#TradingSignals",
   NO_TRADE_CALL: "#RiskManagement",
   LEVEL_ALERT: "#PriceAction",
   TEACH: "#TradingTips",
@@ -1142,43 +1180,24 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
   const grade = options.grade || gradeSetup(ctx);
   grade.ctx = ctx;
 
+  // The scheduler decides which slots are signals (see SIGNAL_SHARE) and passes
+  // format: "EVIDENCE_SIGNAL" for those, noSignal for the rest. Without a scheduler
+  // (the worker, the test harness), a tradable chart is a signal half the time.
   let weightedFormats;
-  if (options.preferSignals && grade.verdict === "TRADE") {
-    // Peak window with a chart that earned it: publish the setup.
-    weightedFormats = ["EVIDENCE_SIGNAL"];
-  } else if (options.preferSignals && grade.verdict === "WATCH") {
-    // Peak window, weaker chart: mostly a half size setup, sometimes just the level.
-    weightedFormats = ["EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "LEVEL_ALERT"];
-  } else if (grade.verdict === "TRADE") {
-    // A chart that earned a trade gets written as one most of the time. The other
-    // formats still carry the same setup in their trade block.
-    weightedFormats = [
-      "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL",
-      "LEVEL_ALERT",
-      "QUICK_TAKE",
-    ];
-  } else if (grade.verdict === "WATCH") {
-    // No pass post here: "I am not touching it" above its own trade block would
-    // contradict itself.
-    weightedFormats = [
-      "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL", "EVIDENCE_SIGNAL",
-      "LEVEL_ALERT", "LEVEL_ALERT",
-      "TEACH",
-      "TRENDING_TOPIC",
-      "QUICK_TAKE",
-    ];
+  if (grade.verdict === "TRADE" || grade.verdict === "WATCH") {
+    weightedFormats = ["LEVEL_ALERT", "LEVEL_ALERT", "TEACH", "TRENDING_TOPIC", "QUICK_TAKE"];
+    if (!options.noSignal) weightedFormats.push(...Array(weightedFormats.length).fill("EVIDENCE_SIGNAL"));
   } else {
-    // Nothing tradable here. Say so, or teach instead. Never manufacture a setup
-    // just because the scheduler fired.
-    weightedFormats = [
-      "NO_TRADE_CALL", "NO_TRADE_CALL", "NO_TRADE_CALL",
-      "TEACH", "TEACH",
-      "TRENDING_TOPIC", "TRENDING_TOPIC",
-      "LEVEL_ALERT",
-    ];
+    // Nothing tradable here. Teach, talk trends, or name the level to watch; the odd
+    // public pass keeps the signals believable. Never manufacture a setup.
+    weightedFormats = ["NO_TRADE_CALL", "TEACH", "TEACH", "TRENDING_TOPIC", "TRENDING_TOPIC", "LEVEL_ALERT"];
   }
 
   let formatType = options.format || weightedFormats[Math.floor(Math.random() * weightedFormats.length)];
+
+  if (formatType === "EVIDENCE_SIGNAL" && grade.levels?.stop) {
+    return generateSignalPost(coin, ctx, grade, options);
+  }
 
   // A signal without usable levels is not a signal. This fires when a NO_TRADE chart
   // is asked for EVIDENCE_SIGNAL, including via the test harness, so say so out loud
@@ -1233,24 +1252,8 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
   const targetName = formatType === "TRENDING_TOPIC" ? trendingTopic.hashtag : `$${coin?.baseAsset || "MARKET"}`;
   console.log(`[ai] Format [${formatType}] for ${targetName} (verdict: ${grade.verdict}, score: ${grade.score})`);
 
-  // The setup this post hands the reader, if any chart has earned one. This coin's
-  // own levels when it graded TRADE or WATCH, otherwise the best graded alternative
-  // the scheduler found. A pass post never carries its own coin's levels.
-  const ownTradable = grade.verdict !== "NO_TRADE" && grade.levels?.stop;
-  const alt = options.altSetup && options.altSetup.coin?.baseAsset !== coin?.baseAsset && options.altSetup.grade?.levels?.stop ? options.altSetup : null;
-  let action = null;
-  if (ownTradable && !["NO_TRADE_CALL", "TRENDING_TOPIC"].includes(formatType)) {
-    action = { coin, grade, ctx, alt: false };
-  } else if (formatType === "TRENDING_TOPIC" && ownTradable) {
-    action = { coin, grade, ctx, alt: true };
-  } else if (alt) {
-    action = { ...alt, alt: true };
-  }
-  if (action) console.log(`[ai] Trade block: $${action.coin.baseAsset} (${action.grade.verdict}${action.alt ? ", alternative" : ""})`);
-
   const prompt = buildMultiFormatPrompt(coin, formatType, allMovers, trendingTopic, grade, {
     topicCoin,
-    altSymbol: formatType === "NO_TRADE_CALL" && action?.alt ? action.coin.baseAsset : null,
   });
 
   // Numbers are checked against whichever coin the post is actually about.
@@ -1268,34 +1271,7 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
       : ctx;
   const checkLevels = formatType === "TRENDING_TOPIC" ? null : grade.levels;
 
-  const rawProvider = String(options.provider || "").trim().toLowerCase();
-  const isGemini = rawProvider === "1" || rawProvider === "gemini";
-  const isOpenRouter = rawProvider === "openrouter" || rawProvider === "2" || (!isGemini && options.openrouterKey);
-
-  // Try the configured provider, then fall back to the other one if a key exists.
-  const runModel = async (p) => {
-    const primary = isOpenRouter ? "openrouter" : "gemini";
-    const order = primary === "openrouter" ? ["openrouter", "gemini"] : ["gemini", "openrouter"];
-
-    let lastErr;
-    for (const provider of order) {
-      const key = provider === "openrouter" ? options.openrouterKey : options.geminiKey;
-      if (!key) continue;
-      try {
-        // LLM_MODEL names a model on the PRIMARY provider only.
-        const model = provider === primary ? options.model : undefined;
-        if (provider === "openrouter") {
-          return await generateWithOpenRouter(p, key, model || "qwen/qwen-2.5-7b-instruct");
-        }
-        return await generateWithGemini(p, key, model);
-      } catch (err) {
-        lastErr = err;
-        console.warn(`[ai] ${provider} failed: ${err.message.slice(0, 160)}`);
-        if (provider !== order[order.length - 1]) console.warn(`[ai] Falling back to the other provider.`);
-      }
-    }
-    throw lastErr || new Error("No LLM API key configured. Set OPENROUTER_API_KEY or GEMINI_API_KEY in .env");
-  };
+  const runModel = makeModelRunner(options);
 
   const review = (t) => ({
     problems: lintPost(t, formatType),
@@ -1336,50 +1312,110 @@ RETRY. Your previous attempt was rejected because ${issues.join("; ")}. Write th
     console.warn(`[review] ❌ Post still references levels not in the data: ${result.numbers.offenders.join(", ")}`);
   }
 
-  let tradeBlock = null;
-  if (action) {
-    const a = action.coin.baseAsset;
-    const reason = action.grade.reasons?.[0] ? `${action.grade.reasons[0].replace(/\.$/, "")}.` : "";
-    let intro = null;
-    if (!action.alt && formatType !== "EVIDENCE_SIGNAL") {
-      intro = "If you want the trade:";
-    } else if (action.alt && formatType === "NO_TRADE_CALL") {
-      intro = reason ? `Why $${a}: ${reason}` : null;
-    } else if (action.alt) {
-      intro = `What I would trade right now: $${a}.${reason ? ` ${reason}` : ""}`;
-    }
-    tradeBlock = buildTradeBlock(a, action.grade.levels, {
-      price: action.ctx?.price ?? action.coin.lastPrice,
-      half: action.grade.verdict === "WATCH",
-      intro,
-    });
-  }
-
   const finalText = finalizePost(text, {
     symbol: postSymbol,
     formatType,
     trendingTopic,
     hotList: hotList || [],
-    trackRecord: options.trackRecord || null,
-    tradeBlock,
-    tradeSymbol: action?.coin.baseAsset || null,
   });
 
   const out = new String(finalText);
   out.text = finalText;
   out.formatType = formatType;
-  // The coin this post is about keeps its cashtag link; with a trade block for
-  // another coin, that one takes Square's second slot.
-  out.primarySymbol = postSymbol || action?.coin.baseAsset || null;
+  out.primarySymbol = postSymbol;
   out.hashtag = trendingTopic?.hashtag || null;
   out.grade = grade;
   out.verdict = grade.verdict;
-  // Every post that publishes levels is logged as a call and graded later, whichever
-  // coin they belong to. That is what keeps the follow ups and the record honest.
-  out.levels = tradeBlock ? action.grade.levels : null;
-  out.callCoin = tradeBlock ? action.coin : null;
-  out.callGrade = tradeBlock ? action.grade : null;
+  // Only signals publish levels, so only signals are logged as calls.
+  out.levels = null;
   return out;
+}
+
+/**
+ * A trade signal. The model writes the headline and the reasons in plain words;
+ * everything else is assembled in code. If the model is unavailable or its answer
+ * is the wrong shape twice, the post goes out with the plain reasons from code, so
+ * a signal slot is never lost to an LLM hiccup.
+ */
+async function generateSignalPost(coin, ctx, grade, options) {
+  const symbol = coin.baseAsset;
+  const direction = grade.direction === "SHORT" ? "SHORT" : "LONG";
+  console.log(`[ai] Format [EVIDENCE_SIGNAL] ${direction} for $${symbol} (verdict: ${grade.verdict}, score: ${grade.score})`);
+
+  const reasons = plainReasons(ctx, direction);
+  const prompt = buildMultiFormatPrompt(coin, "EVIDENCE_SIGNAL", [], null, grade, { reasons });
+  const runModel = makeModelRunner(options);
+
+  let intro = null;
+  for (let attempt = 0; attempt < 2 && !intro; attempt++) {
+    try {
+      const text = await runModel(attempt === 0 ? prompt : `${prompt}\n\nRETRY. Your last answer had the wrong shape or used a number that is not in the data. One headline line, then 2 or 3 lines starting with "• ".`);
+      const parsed = parseSignalIntro(text, symbol);
+      const numbers = validatePostNumbers(text, ctx, grade.levels);
+      if (parsed && numbers.ok) intro = parsed;
+      else console.warn(`[review] ⚠️ Signal intro rejected (${!parsed ? "wrong shape" : `invented levels ${numbers.offenders.join(", ")}`}).`);
+    } catch (err) {
+      console.warn(`[ai] Signal intro failed: ${err.message.slice(0, 160)}`);
+      break;
+    }
+  }
+  if (!intro) {
+    console.log(`[ai] Using the plain reasons from code for this signal.`);
+    intro = { headline: null, reasons: reasons.length >= 2 ? reasons : [...reasons, ...(grade.reasons || [])].slice(0, 2) };
+  }
+
+  const text = buildSignalPost({
+    symbol,
+    direction,
+    intro,
+    levels: grade.levels,
+    price: ctx?.price ?? coin.lastPrice,
+    trackRecord: options.trackRecord || null,
+    hashtags: buildHashtags(symbol, "EVIDENCE_SIGNAL", null, options.hotList || []),
+  });
+
+  const out = new String(text);
+  out.text = text;
+  out.formatType = "EVIDENCE_SIGNAL";
+  out.primarySymbol = symbol;
+  out.hashtag = null;
+  out.grade = grade;
+  out.verdict = grade.verdict;
+  out.direction = direction;
+  out.levels = grade.levels;
+  out.callCoin = coin;
+  out.callGrade = grade;
+  return out;
+}
+
+/** Call the configured LLM, falling back to the other provider if it has a key. */
+function makeModelRunner(options) {
+  const rawProvider = String(options.provider || "").trim().toLowerCase();
+  const isGemini = rawProvider === "1" || rawProvider === "gemini";
+  const isOpenRouter = rawProvider === "openrouter" || rawProvider === "2" || (!isGemini && options.openrouterKey);
+  const primary = isOpenRouter ? "openrouter" : "gemini";
+  const order = primary === "openrouter" ? ["openrouter", "gemini"] : ["gemini", "openrouter"];
+
+  return async (p) => {
+    let lastErr;
+    for (const provider of order) {
+      const key = provider === "openrouter" ? options.openrouterKey : options.geminiKey;
+      if (!key) continue;
+      try {
+        // LLM_MODEL names a model on the PRIMARY provider only.
+        const model = provider === primary ? options.model : undefined;
+        if (provider === "openrouter") {
+          return await generateWithOpenRouter(p, key, model || "qwen/qwen-2.5-7b-instruct");
+        }
+        return await generateWithGemini(p, key, model);
+      } catch (err) {
+        lastErr = err;
+        console.warn(`[ai] ${provider} failed: ${err.message.slice(0, 160)}`);
+        if (provider !== order[order.length - 1]) console.warn(`[ai] Falling back to the other provider.`);
+      }
+    }
+    throw lastErr || new Error("No LLM API key configured. Set OPENROUTER_API_KEY or GEMINI_API_KEY in .env");
+  };
 }
 
 /**
