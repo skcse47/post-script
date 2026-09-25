@@ -346,24 +346,25 @@ function buildMultiFormatPrompt(coin, formatType = "EVIDENCE_SIGNAL", allMovers 
 - 24h change: ${signedPct(ctx.changePct, 1)}
 - 24h range: $${px(ctx.rangeLow)} to $${px(ctx.rangeHigh)}, price is at ${ctx.rangePos.toFixed(0)}% of that range
 - 7 day high: $${px(ctx.high7d)} (price is ${ctx.pctFrom7dHigh.toFixed(1)}% from it)
-- 1h RSI: ${ctx.rsi1h !== null ? ctx.rsi1h.toFixed(0) : "n/a"}
+- 1h RSI: ${Number.isFinite(ctx.rsi1h) ? ctx.rsi1h.toFixed(0) : "n/a"}
 - 24h volume: $${fmtCompact(ctx.last24Vol)}, which is ${ctx.volRatio.toFixed(1)}x the 7 day average
-- 1h ATR: ${ctx.atrPct !== null ? ctx.atrPct.toFixed(1) : "n/a"}% of price (the normal hourly swing)
+- 1h ATR: ${Number.isFinite(ctx.atrPct) ? ctx.atrPct.toFixed(1) : "n/a"}% of price (the normal hourly swing)
 - Last 24h swing low: $${px(ctx.swingLow1h)}   Last 24h swing high: $${px(ctx.swingHigh1h)}`
     : `MARKET DATA for ${S}: price $${px(coin?.lastPrice || 0)}, 24h change ${signedPct(coin?.priceChangePercent || 0, 1)}.`;
 
   const voiceFor = (tag) => `VOICE AND HONESTY RULES (these override everything else):
 1. You are an experienced trader sharing a chart read with a friend. First person, plain, confident, a little blunt. Sound like a person, never like a report or an AI.
 2. NEVER claim you already bought, sold, or made money. Say what the setup is and what you would do.
-3. NEVER invent a number, news, partnership, whale move, on chain stat or event. Use ONLY the data above. If you have no number for a point, drop the point.
+3. NEVER invent a number, news, partnership, whale move, on chain stat or event. Use ONLY the data above, including every percentage: if you say price is some percent from a level, it must match the numbers given. If you have no number for a point, drop the point.
 4. NEVER promise an outcome. No "guaranteed", "easy money", "will pump", "moon", "100x".
 5. ${tag ? `Every time you name the coin write it as ${tag} with the dollar sign. Never write the bare ticker.` : "Do not name any coin ticker."}
-6. Maximum 4 emojis. Only at the START of a line that has text after it (📊 🎯 🛑 ✅ ⚠️ 👀). Never an emoji on a line by itself, never two in a row.
-7. No dashes of any kind: no "--", no em dash, no en dash. Use a full stop or a comma.
-8. Short lines, one idea per line, a blank line between blocks. People read this on a phone.
-9. Do NOT write hashtags and do NOT write a disclaimer. Both are added automatically.
-10. Never copy wording from these instructions, and never write labels like "Hook", "Line 1", "Structure" or "The level".
-11. Output ONLY the finished post. No preamble, no quotes around it, no notes after it.`;
+6. At most 2 emojis in the whole post, and never one on a line by itself. A post marked up with an emoji on every line reads as generated.
+7. Barely any punctuation. No full stop at the end of a line. At most one comma in a line. No colons, no semicolons, no dashes of any kind, no underscores, no quotes. At most one question mark in the whole post. Numbers keep their decimal point, write 9.9 percent and never 9 point 9 percent.
+8. Never use bullet points, numbering or headings. Plain lines only.
+9. Type like a trader on his phone. Vary the lines, one can be three words, and never start two lines the same way. Short lines, one idea per line, a blank line between blocks.
+10. Do NOT write hashtags and do NOT write a disclaimer. Both are added automatically.
+11. Never copy wording from these instructions, and never write labels like "Hook", "Line 1", "Structure" or "The level".
+12. Output ONLY the finished post. No preamble, no quotes around it, no notes after it.`;
   const VOICE = voiceFor(S);
 
   const HOOK_RULE = `THE FIRST LINE IS EVERYTHING. Square shows only the first 2 lines before "see more".
@@ -556,93 +557,187 @@ THE REASONS (true, measured; rewrite them in very simple words):
 ${facts || evidence || "- Volume and price action support the move."}
 
 WRITE EXACTLY THIS, nothing else:
-Line 1: a headline of at most 9 words that contains ${S} and says it looks ready to ${isShort ? "drop" : "go up"}. End with ${isShort ? "📉" : "📈"}.
-Then 2 or 3 lines, each starting with "• ". Each line is ONE reason with its real number, at most 12 words.
+First line: at most 9 words, contains ${S}, says it looks ready to ${isShort ? "drop" : "go up"}.
+Then 2 or 3 plain lines. Each one reason with its real number, at most 12 words.
 
-RULES:
-- Words a 12 year old understands. Say "buyers", "sellers", "volume", "today's high". Never "liquidity", "structure", "confluence", "distribution", "momentum shift".
+HOW TO WRITE IT (this matters as much as the content):
+- Type like a trader on his phone, not like an article. No bullet points, no numbering, no headings.
+- Barely any punctuation. No full stop at the end of a line. At most one comma in a line. No colons, no semicolons, no dashes, no underscores, no quotes, no question marks.
+- Numbers keep their decimal point. Write 9.9 percent, never 9 point 9 percent.
+- Vary the lines. One can be three words. Do not start two lines the same way.
+- Words a 12 year old understands. Say buyers, sellers, volume, today's high. Never liquidity, structure, confluence, distribution, momentum shift.
 - Use only numbers from the data above. Never invent one.
-- Say "can" or "looks ready". Never "will", "guaranteed", "100%", "moon".
-- Write the coin as ${S}. No hashtags, no entry, no stop, no targets, no question. Those are added automatically.
-- No dashes of any kind.
+- Say can or looks ready. Never will, guaranteed, 100%, moon.
+- At most one emoji in the whole thing, and only if it feels natural.
+- Write the coin as ${S}. No hashtags, no entry, no stop, no targets. Those are added automatically.
 - Output only those lines.`;
 }
 
 /**
  * The levels and the call to action, built in code so the numbers are exactly the
- * graded ones. The cashtag sits on the buy (or short) line, where the reader's intent
- * is highest, and again in "Tap $COIN to buy". One level per line, plain labels, no
- * trader shorthand like R multiples: it has to read at a glance.
+ * graded ones and the cashtag sits where the reader is deciding.
+ *
+ * Deliberately plain: no emoji per line, no full stops, hardly any commas, and the
+ * three targets on one line instead of stacked. A post that arrives as a neat
+ * emoji list every hour reads as a bot, and Square buries it. The wording rotates
+ * so two posts in a row are never laid out the same way.
  */
-export function buildTradeBlock(symbol, levels, { price = null, direction = "LONG", intro = null } = {}) {
+export function buildTradeBlock(symbol, levels, { price = null, direction = "LONG", intro = null, withAction = true } = {}) {
   if (!symbol || !levels?.stop || !levels?.targets?.length) return null;
   const S = `$${symbol}`;
   const short = direction === "SHORT";
-  const lines = [];
-  if (intro) lines.push(intro);
-  lines.push(`🎯 ${short ? "Short" : "Buy"} ${S} at: $${px(levels.entryLow)} to $${px(levels.entryHigh)}`);
-  lines.push(`🛑 Stop loss: $${px(levels.stop)}`);
-  levels.targets.forEach((t, i) => lines.push(`✅ Target ${i + 1}: $${px(t)}`));
+  const lo = px(levels.entryLow);
+  const hi = px(levels.entryHigh);
+  const stop = px(levels.stop);
+  const t = levels.targets.map(px);
 
-  // Where price is right now against the zone. True at the moment of posting, which
-  // is the only kind of urgency worth using.
-  const inZone = Number.isFinite(price) && price >= levels.entryLow && price <= levels.entryHigh;
-  let action;
-  if (short) {
-    if (inZone || !Number.isFinite(price)) action = `Price is in the zone now. Tap ${S} to open a short.`;
-    else if (price < levels.entryLow) action = `Price is just below the zone. Tap ${S} and set a short limit at $${px(levels.entryLow)}.`;
-    else action = `Tap ${S} to open a short from the zone.`;
-  } else {
-    if (inZone || !Number.isFinite(price)) action = pick([`Price is in the buy zone now. Tap ${S} to buy.`, `${S} is in the buy zone right now. Tap ${S} to buy.`]);
-    else if (price > levels.entryHigh) action = `Price is just above the zone. Tap ${S} and set a buy limit at $${px(levels.entryHigh)}.`;
-    else action = `Tap ${S} to buy from the zone.`;
-  }
-  return `${lines.join("\n")}\n\n${action}`;
+  const layouts = [
+    () => [
+      `${short ? "Short" : "Buy"} ${S} ${lo} to ${hi}`,
+      `SL ${stop}`,
+      `Targets ${t.join(" / ")}`,
+    ],
+    () => [
+      `Entry zone ${lo} to ${hi}`,
+      `Stop ${stop}`,
+      `Targets ${t[0]} then ${t[1]} then ${t[2]}`,
+    ],
+    () => [
+      `${short ? "Shorting" : "Buying"} ${S} between ${lo} and ${hi}`,
+      `Invalid ${short ? "above" : "below"} ${stop}`,
+      `Taking profit at ${t[0]} ${t[1]} ${t[2]}`,
+    ],
+    () => [
+      `🎯 ${short ? "Short" : "Buy"} ${S} ${lo} to ${hi}`,
+      `Stop loss ${stop}`,
+      `Targets ${t.join(" / ")}`,
+    ],
+  ];
+
+  const lines = intro ? [intro, ...pick(layouts)()] : pick(layouts)();
+  if (!withAction) return lines.join("\n");
+  return `${lines.join("\n")}\n\n${buildActionLine(symbol, levels, { price, direction })}`;
 }
 
+/**
+ * Where price is right now against the zone, and the tap. True at the moment of
+ * posting, which is the only kind of urgency worth using.
+ */
+export function buildActionLine(symbol, levels, { price = null, direction = "LONG" } = {}) {
+  const S = `$${symbol}`;
+  const short = direction === "SHORT";
+  const inZone = Number.isFinite(price) && price >= levels.entryLow && price <= levels.entryHigh;
+  const verb = short ? "short" : "buy";
+  let action;
+  if (inZone || !Number.isFinite(price)) {
+    action = pick([
+      `Price is in the zone right now\nTap ${S} to ${verb}`,
+      `Sitting inside the zone as I type this\nTap ${S} to ${verb}`,
+      `Tap ${S} to ${verb} it here`,
+    ]);
+  } else if (short ? price < levels.entryLow : price > levels.entryHigh) {
+    const limit = px(short ? levels.entryLow : levels.entryHigh);
+    action = `Price ran ${short ? "under" : "past"} the zone\nTap ${S} and leave a limit at ${limit}`;
+  } else {
+    action = `Tap ${S} to ${verb} it from the zone`;
+  }
+  return action;
+}
+
+// Asked on maybe half the posts. A question every single time is its own tell.
 const SIGNAL_QUESTIONS = {
-  LONG: ["Are you buying this one? 👇", "In or out? 👇", "Taking this trade? Yes or no 👇"],
-  SHORT: ["Shorting this one? 👇", "In or out? 👇", "Taking this short? Yes or no 👇"],
+  LONG: ["Are you buying this one 👇", "In or out", "Who else is in", "Taking it or watching it"],
+  SHORT: ["Shorting this or fading me 👇", "In or out", "Who else sees this", "Taking it or watching it"],
 };
 
 const SIGNAL_HEADLINES = {
-  LONG: [(s) => `${s} looks ready to go higher 📈`, (s) => `${s} is setting up for a move up 📈`, (s) => `Buyers are stepping into ${s} 📈`],
-  SHORT: [(s) => `${s} looks ready to drop 📉`, (s) => `${s} is running out of buyers 📉`, (s) => `${s} pumped too far, a pullback looks close 📉`],
+  LONG: [
+    (s) => `${s} looks ready to run`,
+    (s) => `Buyers are stepping into ${s}`,
+    (s) => `Watching ${s} closely here`,
+    (s) => `${s} is where I want to be today`,
+  ],
+  SHORT: [
+    (s) => `${s} looks ready to drop`,
+    (s) => `${s} is running out of buyers`,
+    (s) => `Fading ${s} up here`,
+    (s) => `${s} pumped too far too fast`,
+  ],
 };
 
 /**
- * Parse the model's headline and reasons. Returns null when the shape is wrong, so
- * the caller can retry or fall back to the plain reasons from code.
+ * Parse the model's headline and reasons.
+ *
+ * Bullets are stripped rather than required: the prompt now asks for plain lines,
+ * because a bulleted list in every post is exactly what makes a feed look generated.
+ * Returns null when the shape is wrong so the caller can retry.
  */
 export function parseSignalIntro(text, symbol) {
   const lines = String(text || "")
     .split("\n")
-    .map((l) => l.trim())
+    .map((l) => l.replace(/^\s*[•\-*·\d.]+\s*/, "").trim())
     .filter(Boolean)
-    .filter((l) => !/^#/.test(l));
+    .filter((l) => !/^#/.test(l) && !/^(why|reasons?|headline)\b.{0,12}:?$/i.test(l));
   if (lines.length < 3) return null;
   const headline = lines[0].replace(/^["'*]+|["'*]+$/g, "").trim();
-  const reasons = lines
-    .slice(1)
-    .filter((l) => /^[•\-*·]\s*/.test(l))
-    .map((l) => l.replace(/^[•\-*·]\s*/, "").trim())
-    .filter(Boolean)
-    .slice(0, 3);
+  const reasons = lines.slice(1, 4).filter((r) => r.length <= 110);
   if (!headline || headline.length > 90 || reasons.length < 2) return null;
-  if (reasons.some((r) => r.length > 110)) return null;
   return { headline, reasons };
 }
 
 /**
- * The whole signal post:
+ * Strip the punctuation that makes a post read as written by a machine.
  *
- *   headline with the cashtag
- *   Why it can pump / dump: two or three reasons
- *   buy zone, stop loss, three targets
- *   where price is now, "Tap $COIN to buy"
- *   a yes or no question
- *   the 7 day record, when there is enough of one
- *   hashtags
+ * Full stops at the end of every short line, three commas in a sentence, colons
+ * introducing lists, underscores and double dashes: none of that is how people type
+ * on Square. Prices and decimals are left alone.
+ */
+export function humanizePunctuation(text) {
+  const lines = String(text).split("\n");
+  const out = lines.map((line) => {
+    let l = line
+      .replace(/_/g, " ")
+      .replace(/;/g, " ")
+      .replace(/\.{2,}/g, " ")
+      .replace(/([!?]){2,}/g, "$1")
+      .replace(/,\s+(so|which|and|but|then)\s/gi, " $1 ")
+      .replace(/\s+([,.])/g, "$1");
+
+    // At most one comma per line; later ones become spaces.
+    let seen = 0;
+    l = l.replace(/,/g, () => (++seen === 1 ? "," : " "));
+
+    // A colon is fine mid sentence but not as a list header.
+    l = l.replace(/:\s*$/, "");
+
+    // Drop the full stop that ends a line. Keep it inside the line, where it is
+    // separating two real sentences.
+    l = l.replace(/\.\s*$/, "");
+    return l.replace(/[ \t]{2,}/g, " ").trimEnd();
+  });
+
+  // One question mark per post, the last one wins.
+  let joined = out.join("\n");
+  // A post that opens lower case reads as unfinished rather than casual.
+  joined = joined.replace(/^(\p{Extended_Pictographic}️?\s*)?(\p{Ll})/u, (m, lead = "", ch) => `${lead}${ch.toUpperCase()}`);
+  // Indicator names stay capitalised however the model typed them, so a capitalised
+  // line never reads "Rsi is at 80".
+  joined = joined.replace(/\b(rsi|atr|sl|tp)\b/gi, (m) => m.toUpperCase());
+  const qs = (joined.match(/\?/g) || []).length;
+  if (qs > 1) {
+    let left = qs - 1;
+    joined = joined.replace(/\?/g, (m) => (left-- > 0 ? "" : m));
+  }
+  return joined;
+}
+
+/**
+ * The whole signal post.
+ *
+ * Three layouts, picked at random, so the feed does not show the same skeleton every
+ * time: reasons before the levels, one reason as the opening line, or the levels
+ * first with the reasons underneath. The track record and the question each appear
+ * about half the time, for the same reason.
  */
 export function buildSignalPost({ symbol, direction = "LONG", intro, levels, price, trackRecord = null, hashtags = [] }) {
   const S = `$${symbol}`;
@@ -650,20 +745,44 @@ export function buildSignalPost({ symbol, direction = "LONG", intro, levels, pri
   let headline = intro?.headline || pick(SIGNAL_HEADLINES[dir])(S);
   if (!new RegExp(`\\$${symbol}\\b`, "i").test(headline)) {
     const bare = new RegExp(`(^|[^$A-Za-z0-9])(${symbol})\\b`, "i");
-    headline = bare.test(headline) ? headline.replace(bare, (_, pre) => `${pre}${S}`) : `${S}: ${headline}`;
+    headline = bare.test(headline) ? headline.replace(bare, (_, pre) => `${pre}${S}`) : `${S} ${headline}`;
   }
 
-  const parts = [
-    headline,
-    `${dir === "SHORT" ? "Why it can dump:" : "Why it can pump:"}\n${intro.reasons.map((r) => `• ${r}`).join("\n")}`,
-    buildTradeBlock(symbol, levels, { price, direction: dir }),
-    pick(SIGNAL_QUESTIONS[dir]),
-  ];
-  if (trackRecord) {
-    parts.push(`📒 My last ${trackRecord.days} days: ${trackRecord.wins} hit target, ${trackRecord.stopped} hit stop. Losses included.`);
+  const reasons = intro.reasons.slice(0, 3).map((r) => r.charAt(0).toUpperCase() + r.slice(1));
+  const trade = buildTradeBlock(symbol, levels, { price, direction: dir });
+  const shape = Math.random();
+  const parts = [];
+
+  if (shape < 0.34) {
+    // Headline, then the reasons as plain lines, then the trade.
+    parts.push(headline, reasons.join("\n"), trade);
+  } else if (shape < 0.67) {
+    // Headline carries the first reason, the rest sit under the levels, and the tap
+    // still closes the post.
+    parts.push(
+      `${headline}\n${reasons[0]}`,
+      buildTradeBlock(symbol, levels, { price, direction: dir, withAction: false }),
+      reasons.slice(1).join("\n"),
+      buildActionLine(symbol, levels, { price, direction: dir })
+    );
+  } else {
+    // Levels first for readers who only want the trade, reasons under them, and the
+    // tap last so the post still ends on the thing to do.
+    parts.push(
+      headline,
+      buildTradeBlock(symbol, levels, { price, direction: dir, withAction: false }),
+      reasons.join("\n"),
+      buildActionLine(symbol, levels, { price, direction: dir })
+    );
   }
+
+  if (trackRecord && Math.random() < 0.5) {
+    parts.push(`Last ${trackRecord.days} days of my calls, ${trackRecord.wins} hit target and ${trackRecord.stopped} hit stop`);
+  }
+  if (Math.random() < 0.5) parts.push(pick(SIGNAL_QUESTIONS[dir]));
   if (hashtags.length) parts.push(hashtags.join(" "));
-  return parts.join("\n\n");
+
+  return humanizePunctuation(parts.filter(Boolean).join("\n\n"));
 }
 
 /**
@@ -706,15 +825,15 @@ function buildHashtags(symbol, formatType, trendingTopic, hotList, tradeSymbol =
   // The coin in the trade block gets its tag page too.
   if (tradeSymbol && tradeSymbol !== symbol) tags.push(`#${tradeSymbol}`);
   if (FORMAT_TAGS[formatType]) tags.push(FORMAT_TAGS[formatType]);
-  return [...new Set(tags)].slice(0, 3);
+  return [...new Set(tags)].slice(0, 2);
 }
 
 // Lines in the post that ask the reader to open the coin page. Used only when the
 // model forgot to include one, so the cashtag still gets a second, intentional click.
 const CASHTAG_CTA = [
-  (s) => `Tap $${s} and check the hourly chart yourself.`,
-  (s) => `Don't take my word for it. Tap $${s} and look at the candles.`,
-  (s) => `Open $${s} and set an alert at the level.`,
+  (s) => `Tap $${s} and check the hourly chart yourself`,
+  (s) => `Do not take my word for it, tap $${s} and look at the candles`,
+  (s) => `Open $${s} and set an alert at that level`,
 ];
 
 /**
@@ -744,12 +863,12 @@ export function finalizePost(text, { symbol, formatType, trendingTopic = null, h
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  // Keep the first 4 line marker emojis. A wall of them is what pump accounts look like.
-  // The entry / stop / target lines are exempt, so the levels block stays uniform.
+  // Keep at most 2 line marker emojis. An emoji opening every line is the clearest
+  // tell that a post was generated, and it is what the feed buries.
   let emojiCount = 0;
   body = body.replace(/^(\p{Extended_Pictographic}️?)\s*(?=(.*))/gmu, (m, _e, rest) => {
-    if (/^(\$\w+\s+)?(entry|stop|tp\s?\d)/i.test(rest)) return m;
-    return ++emojiCount <= 4 ? m : "";
+    if (/^(\$\w+\s+)?(buy|short|entry|stop|target|tp\s?\d)/i.test(rest)) return m;
+    return ++emojiCount <= 2 ? m : "";
   });
 
   const hasSymbol = symbol && symbol !== "MARKET";
@@ -800,22 +919,17 @@ export function finalizePost(text, { symbol, formatType, trendingTopic = null, h
     body = blocks.join("\n\n");
   }
 
+  // The track record, on about half the posts that can carry one. Every time is a
+  // signature, and a signature is what makes a feed look automated.
   const footer = [];
-  if (trackRecord && ["EVIDENCE_SIGNAL", "NO_TRADE_CALL"].includes(formatType)) {
-    const sign = trackRecord.totalR >= 0 ? "+" : "";
-    footer.push(
-      `📒 My log, last ${trackRecord.days}d: ${trackRecord.total} calls closed, ${trackRecord.wins} hit a target, ${trackRecord.stopped} stopped. Net ${sign}${trackRecord.totalR.toFixed(1)}R, losses included.`
-    );
+  if (trackRecord && ["EVIDENCE_SIGNAL", "NO_TRADE_CALL"].includes(formatType) && Math.random() < 0.5) {
+    footer.push(`Last ${trackRecord.days} days of my calls, ${trackRecord.wins} hit target and ${trackRecord.stopped} hit stop`);
   }
 
-  const d = new Date(now);
-  const stamp = `${d.getUTCDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()]} ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
-  if (formatType !== "TRENDING_TOPIC" || tradeBlock) {
-    footer.push(`Binance data as of ${stamp}.`);
-  }
-
+  // No data timestamp any more. It was on every post, in the same place, in the same
+  // words, which is exactly the pattern to avoid.
   const tags = buildHashtags(symbol, formatType, trendingTopic, hotList, tradeBlock ? tradeSymbol : null);
-  return [body, footer.join("\n"), tags.join(" ")].filter(Boolean).join("\n\n");
+  return humanizePunctuation([body, footer.join("\n"), tags.join(" ")].filter(Boolean).join("\n\n"));
 }
 
 // Shortest believable post per format. Anything shorter was cut off or refused.
@@ -849,7 +963,10 @@ export function lintPost(text, formatType) {
   if (body.length < min) {
     problems.push(`it is only ${body.length} characters, which reads as cut off`);
   }
-  if (body && !/[.?!)"'’…%]$|\p{Extended_Pictographic}️?$/u.test(body)) {
+  // Posts are written without a full stop at the end of a line now, so the old
+  // "must end in punctuation" check flagged every good draft. A genuinely cut off
+  // post ends on a comma or on a word that cannot end a sentence.
+  if (/,$/.test(body) || /\b(and|or|but|the|a|an|at|to|of|with|from|for|into|than|because|while|so that|which)$/i.test(body)) {
     problems.push("it ends mid sentence");
   }
   return problems;
@@ -923,6 +1040,53 @@ export function validatePostNumbers(text, ctx, levels) {
     offenders.push(m[0]);
   }
 
+  return { ok: offenders.length === 0, offenders };
+}
+
+/**
+ * Check every percentage claim against the ones the data actually supports.
+ *
+ * Prices were already checked; percentages were not, and a model will happily write
+ * "sitting 15 percent below that level" when the real distance is 2. A reader who
+ * checks one wrong number stops believing the rest, so an unsupported percentage
+ * fails the draft the same way an invented price does.
+ */
+export function validatePostPercents(text, ctx, levels) {
+  if (!ctx) return { ok: true, offenders: [] };
+
+  const pctFromPrice = (v) => (Number.isFinite(v) && ctx.price ? Math.abs(((v - ctx.price) / ctx.price) * 100) : null);
+  const allowed = [
+    Math.abs(ctx.changePct),
+    Math.abs(ctx.pctFrom7dHigh),
+    Math.abs(ctx.pctFrom7dLow),
+    ctx.rangePos,
+    100 - ctx.rangePos,
+    ctx.atrPct,
+    ctx.rsi1h,
+    ctx.volRatio,
+    // "2.8x average" is also legitimately written as 280 percent of average, or as
+    // 180 percent more than average. Allowing both saves a pointless retry.
+    ctx.volRatio * 100,
+    (ctx.volRatio - 1) * 100,
+    levels?.riskPct,
+    // How far price sits from every level a post is allowed to mention.
+    ...[
+      ctx.swingHigh1h, ctx.swingLow1h, ctx.swingHigh15m, ctx.swingLow15m,
+      ctx.rangeHigh, ctx.rangeLow, ctx.high7d, ctx.low7d,
+      levels?.stop, levels?.entryLow, levels?.entryHigh, ...(levels?.targets || []),
+    ].map(pctFromPrice),
+    // Round rhetorical figures a lesson legitimately uses ("risk 1% of the account").
+    1, 2, 3, 5, 10, 50, 100,
+  ].filter((n) => typeof n === "number" && Number.isFinite(n));
+
+  const offenders = [];
+  for (const m of String(text).matchAll(/(\d+(?:\.\d+)?)\s*(?:%|percent)/gi)) {
+    const value = parseFloat(m[1]);
+    if (!Number.isFinite(value)) continue;
+    // Tolerate rounding: 0.6 points, or 5% of the figure for the big ones.
+    if (allowed.some((a) => Math.abs(value - a) <= Math.max(0.6, Math.abs(a) * 0.05))) continue;
+    offenders.push(m[0].trim());
+  }
   return { ok: offenders.length === 0, offenders };
 }
 
@@ -1276,6 +1440,7 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
   const review = (t) => ({
     problems: lintPost(t, formatType),
     numbers: validatePostNumbers(t, checkCtx, checkLevels),
+    percents: validatePostPercents(t, checkCtx, checkLevels),
   });
 
   let text = await runModel(prompt);
@@ -1284,10 +1449,11 @@ export async function generateTraderPost(coin, allMovers, options = {}) {
   // One retry, naming exactly what was wrong. Invented prices, a cut off post and a
   // copied instruction label are each the kind of thing a reader notices once and
   // then discounts the account for.
-  if (result.problems.length || !result.numbers.ok) {
+  if (result.problems.length || !result.numbers.ok || !result.percents.ok) {
     const issues = [
       ...result.problems,
       ...(result.numbers.ok ? [] : [`it used price levels that are not in the data: ${result.numbers.offenders.join(", ")}`]),
+      ...(result.percents.ok ? [] : [`it used percentages the data does not support: ${result.percents.offenders.join(", ")}`]),
     ];
     console.warn(`[review] ⚠️ Rejected first draft: ${issues.join("; ")}. Retrying once.`);
     const retryPrompt = `${prompt}
@@ -1296,7 +1462,7 @@ RETRY. Your previous attempt was rejected because ${issues.join("; ")}. Write th
     const retryText = await runModel(retryPrompt);
     const retry = review(retryText);
 
-    const score = (r) => r.problems.length * 10 + r.numbers.offenders.length;
+    const score = (r) => r.problems.length * 10 + r.numbers.offenders.length + r.percents.offenders.length;
     if (score(retry) <= score(result)) {
       text = retryText;
       result = retry;
@@ -1310,6 +1476,11 @@ RETRY. Your previous attempt was rejected because ${issues.join("; ")}. Write th
   }
   if (!result.numbers.ok) {
     console.warn(`[review] ❌ Post still references levels not in the data: ${result.numbers.offenders.join(", ")}`);
+  }
+  // A wrong percentage is the easiest thing in a post for a reader to check, and
+  // "sitting 15 percent below that level" when it is 2 costs more than a skipped slot.
+  if (!result.percents.ok) {
+    throw new Error(`Post claims percentages the data does not support twice (${result.percents.offenders.join(", ")}). Not publishing it.`);
   }
 
   const finalText = finalizePost(text, {
@@ -1349,11 +1520,23 @@ async function generateSignalPost(coin, ctx, grade, options) {
   let intro = null;
   for (let attempt = 0; attempt < 2 && !intro; attempt++) {
     try {
-      const text = await runModel(attempt === 0 ? prompt : `${prompt}\n\nRETRY. Your last answer had the wrong shape or used a number that is not in the data. One headline line, then 2 or 3 lines starting with "• ".`);
+      const text = await runModel(
+        attempt === 0
+          ? prompt
+          : `${prompt}\n\nRETRY. Your last answer had the wrong shape or used a number that is not in the data. One headline line, then 2 or 3 plain lines, no bullets.`
+      );
       const parsed = parseSignalIntro(text, symbol);
       const numbers = validatePostNumbers(text, ctx, grade.levels);
-      if (parsed && numbers.ok) intro = parsed;
-      else console.warn(`[review] ⚠️ Signal intro rejected (${!parsed ? "wrong shape" : `invented levels ${numbers.offenders.join(", ")}`}).`);
+      const percents = validatePostPercents(text, ctx, grade.levels);
+      if (parsed && numbers.ok && percents.ok) intro = parsed;
+      else {
+        const why = !parsed
+          ? "wrong shape"
+          : !numbers.ok
+            ? `invented levels ${numbers.offenders.join(", ")}`
+            : `unsupported percentages ${percents.offenders.join(", ")}`;
+        console.warn(`[review] ⚠️ Signal intro rejected (${why}).`);
+      }
     } catch (err) {
       console.warn(`[ai] Signal intro failed: ${err.message.slice(0, 160)}`);
       break;

@@ -38,21 +38,20 @@ drives reach on Square. That document is the actual point of this repo.
 Half the posts, by default. Built for a reader to act on in a few seconds:
 
 ```
-$MUBARAK looks ready to drop from here 📉
+$QI looks ready to drop from here
 
-Why it can dump:
-• It pumped 55.0% today so buyers are tapped out
-• RSI is at 76 which means it is very overbought
+It pumped 115% today so most buyers are already in
+Price already fell 10.5% from the 7 day high
+RSI is at 86 which is very overbought 📉
 
-🎯 Short $MUBARAK at: $0.05823 to $0.06087
-🛑 Stop loss: $0.06341
-✅ Target 1: $0.05179
-✅ Target 2: $0.04715
-✅ Target 3: $0.04018
+Entry zone 0.003127 to 0.003377
+Stop 0.003558
+Targets 0.002605 then 0.002224 then 0.001652
 
-Price is in the zone now. Tap $MUBARAK to open a short.
+Sitting inside the zone as I type this
+Tap $QI to short
 
-Shorting this one? 👇
+#QI #TradingSignals
 ```
 
 - **Reason first, in plain words.** The model rewrites the measured reasons
@@ -60,12 +59,30 @@ Shorting this one? 👇
 - **Levels and call to action in code** (`buildSignalPost`, `buildTradeBlock`), so
   they are exact. The cashtag sits on the buy / short line and in "Tap $COIN to
   buy". The "in the zone now" line is true at the moment of posting.
+- **Nothing about it repeats.** `buildTradeBlock` rotates four level layouts,
+  `buildSignalPost` three post shapes, and the track record and the closing question
+  each show up about half the time. Two signals in a row never share a skeleton.
 - **Long and short.** Most of the board already pumped; those rarely make good
   longs but often make good fades (`gradeShortSetup`). Settlement grades shorts the
   right way round. Note that a short needs futures, not spot.
 - **Content posts carry no levels**, so the signals stand out in the feed.
 - **No "not financial advice" line.** Square does not require it and it cost a line
   of every post. The stop loss on every signal does the real job.
+
+### Not looking generated
+
+Reach dropped twice on posts that were clean but obviously machine written. What the
+feed rewards is a post that reads like a person typed it on a phone, so both the
+prompts and `humanizePunctuation` enforce:
+
+- **Almost no punctuation.** No full stop ending a line, one comma per line at most,
+  no colons, semicolons, dashes, underscores or quotes, and one question mark per
+  post at the very most. Prices keep their decimals, obviously.
+- **No lists.** No bullets, no numbering, no "Why it can pump:" headers. Plain lines.
+- **At most 2 emojis**, never one opening every line, never one alone on a line.
+- **Two hashtags**, not three.
+- **Nothing in a fixed position.** The data timestamp that closed every post is gone,
+  the track record appears on about half of them, hooks and layouts rotate.
 
 - **The first line.** Square shows about two lines before "see more". Every hook
   carries the cashtag, one real number, and a reason to keep reading.

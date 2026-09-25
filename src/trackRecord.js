@@ -14,6 +14,7 @@
  */
 
 import { fetchKlines, fmtPx } from "./marketContext.js";
+import { humanizePunctuation } from "./topGainersBot.js";
 
 export const TRADE_CALLS_SCHEMA = `
   CREATE TABLE IF NOT EXISTS trade_calls (
@@ -224,40 +225,33 @@ export function buildTrackRecordPost(stats, recentRows = []) {
 
   // Hook leads with the result, good or bad. A net negative week posted honestly
   // earns more trust than a green one, so it gets the same first line treatment.
-  lines.push(`${stats.total} calls in ${stats.days} days. Net ${sign(stats.totalR)}. Every loss included 📊`);
-  lines.push("");
-  lines.push(
-    `${stats.wins} hit a target, ${stats.stopped} stopped out${stats.expired ? `, ${stats.expired} closed flat` : ""}.`
-  );
-  lines.push(`Win rate ${stats.winRate.toFixed(0)}%, risking 1R per idea.`);
+  lines.push(`My last ${stats.days} days on ${stats.total} calls 📊`);
+  lines.push(`${stats.wins} hit a target and ${stats.stopped} hit the stop${stats.expired ? ` with ${stats.expired} flat` : ""}`);
+  lines.push(`That is net ${sign(stats.totalR)} risking the same size every time`);
   lines.push("");
 
+  // A handful of closes, written as sentences rather than a table.
   if (recentRows.length > 0) {
-    lines.push("Recent closes:");
-    recentRows.slice(0, 6).forEach((r) => {
-      const label =
-        r.status === "STOPPED" ? "stopped" : r.status === "EXPIRED" ? "closed flat" : `${r.status} hit`;
-      lines.push(`${r.base_asset} ${label} ${sign(r.result_r || 0)} from $${fmtPx(r.entry)}`);
+    recentRows.slice(0, 4).forEach((r) => {
+      const label = r.status === "STOPPED" ? "stopped out" : r.status === "EXPIRED" ? "closed flat" : `hit target ${r.status.slice(2)}`;
+      lines.push(`${r.base_asset} ${label} ${sign(r.result_r || 0)} from ${fmtPx(r.entry)}`);
     });
     lines.push("");
   }
 
   // Cashtags on best and worst only: Square links two coins per post.
   const sameCoin = stats.best.asset === stats.worst.asset;
-  lines.push(
-    `Best: $${stats.best.asset} ${sign(stats.best.r)}. Worst: ${sameCoin ? "" : "$"}${stats.worst.asset} ${sign(stats.worst.r)}.`
-  );
-  if (stats.open > 0) lines.push(`${stats.open} still open, I will post those results too.`);
+  lines.push(`Best was $${stats.best.asset} at ${sign(stats.best.r)} and worst ${sameCoin ? "" : "$"}${stats.worst.asset} at ${sign(stats.worst.r)}`);
+  if (stats.open > 0) lines.push(`${stats.open} are still running and those get posted too`);
   lines.push("");
-  lines.push(
-    `The losers are in there on purpose. Anyone showing you only green screenshots is selling you something.`
-  );
+  lines.push(`The losers are in there on purpose`);
+  lines.push(`Anyone showing you only green screenshots is selling you something`);
   lines.push("");
-  lines.push("Which one do you want broken down on the chart? 👇");
+  lines.push("Which one do you want broken down 👇");
   lines.push("");
   lines.push("#TradingJournal #CryptoTrading");
 
-  return lines.join("\n");
+  return humanizePunctuation(lines.join("\n"));
 }
 
 /**
@@ -308,58 +302,57 @@ function agoText(fromMs, toMs) {
 export function buildCallUpdatePost(call, { nextTrade = null } = {}) {
   if (!call) return null;
   const S = `$${call.base_asset}`;
-  const r = call.result_r || 0;
-  const rTxt = `${r >= 0 ? "+" : ""}${r.toFixed(1)}R`;
   const took = agoText(call.called_at, call.resolved_at);
   const at = hhmmUtc(call.resolved_at);
-  const original = call.share_link
-    ? `Original post, unedited: ${call.share_link}`
-    : `The original post is on my profile, timestamped and unedited.`;
+  const num = call.status === "TP3" ? 3 : call.status === "TP2" ? 2 : 1;
+  const original = call.share_link ? `Same call I posted, nothing edited\n${call.share_link}` : `The original call is on my profile with its timestamp`;
   const lines = [];
 
   if (String(call.status).startsWith("TP")) {
-    const hitPrice = call.status === "TP3" ? call.tp3 : call.status === "TP2" ? call.tp2 : call.tp1;
-    lines.push(`${S} ${call.status} hit ✅ ${rTxt}, ${took} after I posted it.`);
+    const hitPrice = num === 3 ? call.tp3 : num === 2 ? call.tp2 : call.tp1;
+    lines.push(`Target ${num} done on ${S} ✅`);
+    lines.push(`Called it ${took} ago and it traded there at ${at}`);
     lines.push("");
-    lines.push(`Entry $${fmtPx(call.entry)}. Stop $${fmtPx(call.stop)}.`);
-    lines.push(`${call.status} at $${fmtPx(hitPrice)} traded at ${at}.`);
+    lines.push(`Entry was ${fmtPx(call.entry)} with the stop at ${fmtPx(call.stop)}`);
+    lines.push(`Target ${num} sat at ${fmtPx(hitPrice)}`);
     lines.push("");
-    if (call.status === "TP1") {
-      lines.push(`Next level on the plan was TP2 at $${fmtPx(call.tp2)}.`);
-      lines.push(`If you are still in, a stop at entry makes the rest a free ride.`);
-    } else if (call.status === "TP2") {
-      lines.push(`TP3 at $${fmtPx(call.tp3)} is the last level on the plan.`);
-      lines.push(`Stop at TP1 or entry from here, no reason to give it back.`);
+    if (num === 1) {
+      lines.push(`Next one up is ${fmtPx(call.tp2)}`);
+      lines.push(`Still holding some, stop moved to entry so the rest rides free`);
+    } else if (num === 2) {
+      lines.push(`Last target is ${fmtPx(call.tp3)}`);
+      lines.push(`Stop sits at entry now, no reason to give this back`);
     } else {
-      lines.push(`All three targets done. That is the whole plan, nothing left to manage.`);
+      lines.push(`All three targets done, nothing left to manage`);
     }
     lines.push("");
     lines.push(original);
     lines.push("");
-    lines.push(`I post the stop outs exactly like this. Tap ${S} to see where it trades now.`);
+    lines.push(`Stop outs get posted the same way, tap ${S} to see where it trades now`);
     if (nextTrade) lines.push("", nextTrade);
     lines.push("");
-    lines.push(nextTrade ? `Did you catch ${S}, and are you taking the next one?` : `Did you catch this one, or wait for a better entry?`);
+    lines.push(nextTrade ? `Did you catch ${S}` : `Did you catch this one or wait`);
   } else {
-    lines.push(`${S} stopped out ❌ ${rTxt}. Posting it like I post the wins.`);
+    lines.push(`Stopped out on ${S} ❌`);
+    lines.push(`Posting the losers the same way I post the wins`);
     lines.push("");
-    lines.push(`Entry $${fmtPx(call.entry)}. Stop $${fmtPx(call.stop)}.`);
-    lines.push(`Price traded through the stop at ${at}, ${took} after the call. The idea is dead.`);
+    lines.push(`Entry was ${fmtPx(call.entry)} and the stop at ${fmtPx(call.stop)}`);
+    lines.push(`Price went through it at ${at}, ${took} after the call`);
     lines.push("");
-    lines.push(`No moving the stop. No averaging down.`);
-    lines.push(`It was sized so this costs 1R and nothing more. That is the whole job of a stop.`);
+    lines.push(`No moving the stop and no averaging down`);
+    lines.push(`It was sized small so this one costs very little`);
     lines.push("");
     lines.push(original);
     lines.push("");
-    lines.push(`Tap ${S} to see exactly where it broke.`);
+    lines.push(`Tap ${S} to see exactly where it broke`);
     if (nextTrade) lines.push("", nextTrade);
     lines.push("");
-    lines.push(`After a stop out, do you re-enter or leave the coin alone for the day?`);
+    lines.push(`Do you re enter after a stop out or leave it alone`);
   }
 
   lines.push("");
   lines.push(`#${call.base_asset} #TradingJournal`);
-  return lines.join("\n");
+  return humanizePunctuation(lines.join("\n"));
 }
 
 /** Coins with a call still open, so they are not signalled twice at once. */

@@ -487,18 +487,19 @@ function buildShortLevels(ctx) {
 export function plainReasons(ctx, direction = "LONG") {
   if (!ctx) return [];
   const out = [];
+  // No full stops and no stacked sentences: these lines go straight into a post.
   if (direction === "SHORT") {
-    out.push(`It pumped ${ctx.changePct.toFixed(0)}% in one day. Most buyers are already in.`);
-    if (ctx.fadingFromHigh <= -3) out.push(`Price already fell ${Math.abs(ctx.fadingFromHigh).toFixed(1)}% from the top.`);
-    if (ctx.rsi1h !== null && ctx.rsi1h >= 70) out.push(`RSI is ${ctx.rsi1h.toFixed(0)}. That is very overbought.`);
-    if (ctx.rangePos < 65) out.push(`It dropped back to the middle of today's range. Sellers are stepping in.`);
-    if (ctx.volRatio >= 1.6) out.push(`Volume is ${ctx.volRatio.toFixed(1)}x normal, so a drop can move fast.`);
+    out.push(`It pumped ${ctx.changePct.toFixed(0)}% in one day so most buyers are already in`);
+    if (ctx.fadingFromHigh <= -3) out.push(`Price already fell ${Math.abs(ctx.fadingFromHigh).toFixed(1)}% from the top`);
+    if (Number.isFinite(ctx.rsi1h) && ctx.rsi1h >= 70) out.push(`RSI is ${ctx.rsi1h.toFixed(0)} which is very overbought`);
+    if (ctx.rangePos < 65) out.push(`It slipped back to the middle of today's range as sellers step in`);
+    if (ctx.volRatio >= 1.6) out.push(`Volume is ${ctx.volRatio.toFixed(1)}x normal so a drop can move fast`);
   } else {
-    if (ctx.volRatio >= 1.6) out.push(`Volume is ${ctx.volRatio.toFixed(1)}x higher than normal. Big buyers are active.`);
-    if (ctx.rangePos >= 80) out.push(`Price is holding near today's high, not falling back.`);
-    if (ctx.pctFrom7dHigh > -1.5) out.push(`It is pushing through its 7 day high.`);
-    if (ctx.rsi1h !== null && ctx.rsi1h >= 50 && ctx.rsi1h < 70) out.push(`RSI is ${ctx.rsi1h.toFixed(0)}. Strong, but not overheated yet.`);
-    if (ctx.changePct > 0) out.push(`It is up ${ctx.changePct.toFixed(0)}% today and still holding.`);
+    if (ctx.volRatio >= 1.6) out.push(`Volume is ${ctx.volRatio.toFixed(1)}x higher than normal so big buyers are active`);
+    if (ctx.rangePos >= 80) out.push(`Price is holding near today's high and not falling back`);
+    if (ctx.pctFrom7dHigh > -1.5) out.push(`It is pushing through its 7 day high`);
+    if (Number.isFinite(ctx.rsi1h) && ctx.rsi1h >= 50 && ctx.rsi1h < 70) out.push(`RSI is ${ctx.rsi1h.toFixed(0)} so it is strong but not overheated`);
+    if (ctx.changePct > 0) out.push(`It is up ${ctx.changePct.toFixed(0)}% today and still holding`);
   }
   return out.slice(0, 3);
 }
